@@ -1,8 +1,8 @@
 #include <Servo.h>
 
-const int SERVO_PIN    =  9;
-const int TRIG_PIN     =  6;
-const int ECHO_PIN     =  7;
+const int SERVO_PIN   = 10;
+const int TRIG_PIN    = 11;
+const int ECHO_PIN    = 12;
 const int WL_VCC_PIN   =  8;
 const int WL_DATA_PIN  = A0;
 const int LED_GREEN    =  2;
