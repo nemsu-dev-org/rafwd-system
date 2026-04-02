@@ -34,10 +34,11 @@ const int SWEEP_STEP = 1;
 // FIX 3: 100ms per step — slow constant sweep (~13s per arc)
 const unsigned long STEP_INTERVAL_MS = 100;
 
-const float OBSTRUCT_THRESH = 8.0;   // cm difference from baseline to flag obstruction
-const float DEPTH_ELEVATED  = 10.0;  // cm water depth for ELEVATED
-const float DEPTH_CRITICAL  = 15.0;  // cm water depth for CRITICAL
-const float VARIANCE_THRESH = 3.0;   // variance threshold for waste movement detection
+const float OBSTRUCT_THRESH  = 2.0;   // cm difference from baseline to flag obstruction
+const float DEPTH_ELEVATED   = 10.0;  // cm water depth for ELEVATED
+const float DEPTH_CRITICAL   = 15.0;  // cm water depth for CRITICAL
+const float VARIANCE_THRESH  = 3.0;   // variance threshold for waste movement detection
+const float MEAN_DELTA_THRESH = 1.5;  // avg delta from baseline to flag stationary object
 const int   OBSTRUCTION_HOLD = 20;   // Hold obstruction for 20 steps (2 seconds) to cover close-range sensor blindness
 const int   WL_READ_INTERVAL = 10;   // Read water level every 10 steps (1 second)
 
@@ -160,29 +161,29 @@ var sw=SM;
 var sDist=new Float32Array(SS).fill(-1);
 var sAge=new Float32Array(SS).fill(9999);
 var sObs=new Uint8Array(SS).fill(0);
-var sConf=new Array(SS).fill('NORMAL');
+var sConf=new Array(SS).fill('Normal');
 
 // Sweep trail
 var trail=[];
 var TMAX=30;
 
-var sys={angle:90,dist:-1,depth:0,variance:0,obstr:false,confirmed:'NORMAL'};
+var sys={angle:90,dist:-1,depth:0,variance:0,obstr:false,confirmed:'Normal'};
 var lastC='';
 var logE=document.getElementById('log');
 var HN=120,dH=new Float32Array(HN),vH=new Float32Array(HN),hI=0;
 
 function sCol(s){
-  if(s==='NORMAL')return'#2ECC71';
-  if(s==='ELEVATED')return'#F1C40F';
-  if(s==='WASTE_DETECTED')return'#E67E22';
-  if(s==='CRITICAL_FLOOD')return'#E74C3C';
+  if(s==='Normal')return'#2ECC71';
+  if(s==='Elevated')return'#F1C40F';
+  if(s==='Waste Detected')return'#E67E22';
+  if(s==='Critical Flood Risk')return'#E74C3C';
   return'#6A8FAA';
 }
 function sRGB(s){
-  if(s==='NORMAL')return[46,204,113];
-  if(s==='ELEVATED')return[241,196,15];
-  if(s==='WASTE_DETECTED')return[230,126,34];
-  if(s==='CRITICAL_FLOOD')return[231,76,60];
+  if(s==='Normal')return[46,204,113];
+  if(s==='Elevated')return[241,196,15];
+  if(s==='Waste Detected')return[230,126,34];
+  if(s==='Critical Flood Risk')return[231,76,60];
   return[106,143,170];
 }
 function aLog(m,h){
@@ -318,7 +319,7 @@ function uPanel(){
   var c=sCol(sys.confirmed);
   var sb=document.getElementById('sb');
   sb.style.borderColor=c;sb.style.backgroundColor=c+'20';
-  sb.className='sbox'+(sys.confirmed==='CRITICAL_FLOOD'?' critical':'');
+  sb.className='sbox'+(sys.confirmed==='Critical Flood Risk'?' critical':'');
   var sv=document.getElementById('sv');
   sv.style.color=c;sv.textContent=sys.confirmed;
 
@@ -552,16 +553,25 @@ float calcVariance() {
   float mean = 0.0;
   for (int i = 0; i < BUF_SIZE; i++) mean += buf[i];
   mean /= BUF_SIZE;
-  // Don't skip when mean==0 — that's a valid calm state for deltas
   float v = 0.0;
   for (int i = 0; i < BUF_SIZE; i++) v += pow(buf[i] - mean, 2);
   return v / BUF_SIZE;
 }
 
-Status classify(float depth, float variance, bool obstruction) {
+// Mean delta: catches STATIONARY objects that differ from baseline
+// (variance = 0 for consistent deltas, but mean delta is high)
+float calcMeanDelta() {
+  if (!bufFull && bIdx < BUF_SIZE) return 0.0;
+  float sum = 0.0;
+  for (int i = 0; i < BUF_SIZE; i++) sum += buf[i];
+  return sum / BUF_SIZE;
+}
+
+Status classify(float depth, float variance, float meanDelta, bool obstruction) {
+  bool wasteFlag = variance > VARIANCE_THRESH || obstruction || meanDelta > MEAN_DELTA_THRESH;
   if (depth >= DEPTH_CRITICAL) return CRITICAL;
-  if (depth >= DEPTH_ELEVATED && (variance > VARIANCE_THRESH || obstruction)) return CRITICAL;
-  if (variance > VARIANCE_THRESH || obstruction) return WASTE;
+  if (depth >= DEPTH_ELEVATED && wasteFlag) return CRITICAL;
+  if (wasteFlag) return WASTE;
   if (depth >= DEPTH_ELEVATED) return ELEVATED;
   return NORMAL;
 }
@@ -570,33 +580,61 @@ Status classify(float depth, float variance, bool obstruction) {
 void updateDebounce(Status raw) {
   if (raw == candidateStatus) {
     candidateCount++;
-    int needed;
-    if ((int)raw > (int)confirmedStatus) {
-      needed = DEBOUNCE_ESCALATE;      // Quick to confirm higher severity
-    } else if ((int)raw < (int)confirmedStatus) {
-      needed = DEBOUNCE_DEESCALATE;    // Slow to drop severity
-    } else {
-      needed = DEBOUNCE_ESCALATE;      // Same level
-    }
-    if (candidateCount >= needed) {
-      confirmedStatus = candidateStatus;
-      candidateCount  = needed;
-    }
   } else {
     candidateStatus = raw;
     candidateCount  = 1;
   }
+
+  int needed;
+  if ((int)raw > (int)confirmedStatus) {
+    // Instant escalation to Critical if already alerting (Waste/Elevated)
+    if (raw == CRITICAL && confirmedStatus != NORMAL) {
+      needed = 1;
+    } else {
+      needed = DEBOUNCE_ESCALATE;      // Quick to confirm higher severity
+    }
+  } else if ((int)raw < (int)confirmedStatus) {
+    needed = DEBOUNCE_DEESCALATE;    // Slow to drop severity
+  } else {
+    needed = DEBOUNCE_ESCALATE;      // Same level
+  }
+
+  if (candidateCount >= needed) {
+    confirmedStatus = candidateStatus;
+    candidateCount  = needed;
+  }
 }
 
 void setOutput(Status s) {
+  unsigned long now = millis();
+  bool blinkState = (now / 500) % 2 == 0; // 500ms ON, 500ms OFF
+  bool fastBlink  = (now / 150) % 2 == 0; // 150ms for two-tone critical alarm
+
   digitalWrite(LED_GREEN,  (s == NORMAL) ? HIGH : LOW);
-  digitalWrite(LED_YELLOW, (s == ELEVATED || s == WASTE) ? HIGH : LOW);
+  
+  if (s == WASTE) {
+    digitalWrite(LED_YELLOW, blinkState ? HIGH : LOW);
+  } else {
+    digitalWrite(LED_YELLOW, (s == ELEVATED) ? HIGH : LOW);
+  }
+  
   digitalWrite(LED_RED,    (s == CRITICAL) ? HIGH : LOW);
 
   if (s == WASTE) {
-    ledcWriteTone(BUZZER_PIN, 1200);
+    if (blinkState) {
+      // 3000Hz is near the resonant frequency of most passive buzzers (much louder)
+      ledcWriteTone(BUZZER_PIN, 3000);
+    } else {
+      ledcWriteTone(BUZZER_PIN, 0);
+      ledcWrite(BUZZER_PIN, 0);
+    }
   } else if (s == CRITICAL) {
-    ledcWriteTone(BUZZER_PIN, 2500);
+    // Unique two-tone piercing alarm (Hi-Lo siren) for critical state
+    if (fastBlink) {
+      ledcWriteTone(BUZZER_PIN, 4000);
+    } else {
+      ledcWriteTone(BUZZER_PIN, 3000);
+    }
   } else {
     // ledcWriteTone(pin, 0) doesn't reliably stop on all ESP32 cores.
     // Force duty cycle to 0 to guarantee silence.
@@ -607,11 +645,11 @@ void setOutput(Status s) {
 
 const char* statusLabel(Status s) {
   switch (s) {
-    case NORMAL:   return "NORMAL";
-    case ELEVATED: return "ELEVATED";
-    case WASTE:    return "WASTE_DETECTED";
-    case CRITICAL: return "CRITICAL_FLOOD";
-    default:       return "UNKNOWN";
+    case NORMAL:   return "Normal";
+    case ELEVATED: return "Elevated";
+    case WASTE:    return "Waste Detected";
+    case CRITICAL: return "Critical Flood Risk";
+    default:       return "Unknown";
   }
 }
 
@@ -730,8 +768,9 @@ void loop() {
     obstructionDetected = false;
   }
 
-  // Read water level frequently (~every 3 seconds)
-  if (++stepCount >= WL_READ_INTERVAL) {
+  // Read water level frequently (~1s) or every step if already alerting
+  int currentInterval = (confirmedStatus != NORMAL) ? 1 : WL_READ_INTERVAL;
+  if (++stepCount >= currentInterval) {
     float rawDepth = readWaterLevel();
     if (rawDepth >= 0.0) {
       // EMA smoothing: eliminates ADC jitter while staying responsive
@@ -741,15 +780,16 @@ void loop() {
   }
 
   // Classify and output
-  float  variance = calcVariance();
-  Status raw      = classify(waterDepth, variance, obstructionDetected);
+  float  variance  = calcVariance();
+  float  meanDelta = calcMeanDelta();
+  Status raw       = classify(waterDepth, variance, meanDelta, obstructionDetected);
 
   updateDebounce(raw);
   setOutput(confirmedStatus);
 
   pushLiveData();
 
-  Serial.printf("A:%d D:%.1f Dp:%.1f V:%.2f O:%d S:%s\n",
-                sweepAngle, currentDist, waterDepth, variance,
+  Serial.printf("A:%d D:%.1f Dp:%.1f V:%.2f M:%.2f O:%d S:%s\n",
+                sweepAngle, currentDist, waterDepth, variance, meanDelta,
                 obstructionDetected, statusLabel(confirmedStatus));
 }
