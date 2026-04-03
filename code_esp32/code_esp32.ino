@@ -3,6 +3,7 @@
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
 #include <ESP32Servo.h>
+#include <DNSServer.h>
 
 // ═══════════════════════════════════════════════════════════════
 // CONFIGURATION — Change these constants to tune the system
@@ -28,10 +29,7 @@ const float MAX_DETECTION_RANGE_CM = 20.0;
 
 const int SWEEP_MIN  = 25;
 const int SWEEP_MAX  = 155;
-// FIX 3: 1° per step for smoother, more accurate scanning
 const int SWEEP_STEP = 1;
-
-// FIX 3: 100ms per step — slow constant sweep (~13s per arc)
 const unsigned long STEP_INTERVAL_MS = 100;
 
 const float OBSTRUCT_THRESH  = 2.0;   // cm difference from baseline to flag obstruction
@@ -42,9 +40,8 @@ const float MEAN_DELTA_THRESH = 1.5;  // avg delta from baseline to flag station
 const int   OBSTRUCTION_HOLD = 20;   // Hold obstruction for 20 steps (2 seconds) to cover close-range sensor blindness
 const int   WL_READ_INTERVAL = 10;   // Read water level every 10 steps (1 second)
 
-// Fallback value when no water level sensor is wired
 const float SIMULATED_WATER_DEPTH = 0.0;
-const float WL_EMA_ALPHA = 0.8;  // EMA smoothing: 0.8 = very fast response, slight smoothing
+const float WL_EMA_ALPHA = 0.8;
 
 // ═══════════════════════════════════════════════════════════════
 // STATE VARIABLES
@@ -53,17 +50,14 @@ const int   BASELINE_STEPS = (SWEEP_MAX - SWEEP_MIN) / SWEEP_STEP + 1;
 float       baseline[BASELINE_STEPS];
 bool        baselineReady = false;
 
-// FIX 4: Larger variance buffer for smoother readings
 const int BUF_SIZE = 12;
 float     buf[BUF_SIZE];
 int       bIdx    = 0;
 bool      bufFull = false;
 
-// Asymmetric debounce — quick to escalate, slow to de-escalate
 const int DEBOUNCE_ESCALATE   = 2;
 const int DEBOUNCE_DEESCALATE = 3;
 
-// Stale variance buffer flush — reset after N consecutive out-of-range readings
 int noInRangeCount = 0;
 const int STALE_FLUSH_COUNT = 30;
 
@@ -85,6 +79,7 @@ unsigned long lastStepTime = 0;
 // ── Server Instances ─────────────────────────────────────────────
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
+DNSServer dnsServer;
 
 // ═══════════════════════════════════════════════════════════════
 // HTML INTERFACE (PROGMEM)
@@ -99,49 +94,70 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
   body{
-    background:#0D1B2A;color:#B8D4E8;
-    font-family:'Courier New',monospace;
+    background:#070d13;color:#e2ecf3;
+    font-family:system-ui, -apple-system, sans-serif;
     display:flex;flex-direction:column;
-    align-items:center;min-height:100vh;padding:10px;
+    align-items:center;min-height:100vh;padding:15px;
   }
-  h1{color:#00B4D8;font-size:16px;letter-spacing:3px;margin:10px 0;text-transform:uppercase;text-align:center}
-  #header{display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:12px;font-size:11px}
-  #main{display:flex;gap:16px;flex-wrap:wrap;justify-content:center;width:100%;max-width:900px}
-  canvas#radar{border:1px solid #0077A8;border-radius:4px;background:#050E18;max-width:100%;height:auto}
-  #panel{background:#152638;border:1px solid #0077A8;border-radius:4px;padding:14px;flex:1;min-width:260px;max-width:320px}
-  .ptitle{color:#00B4D8;font-size:11px;letter-spacing:2px;margin-bottom:12px}
-  .sbox{border-radius:4px;padding:10px;margin-bottom:10px;border:1px solid currentColor;transition:all .3s ease}
+  h1{color:#00e5ff;font-size:20px;letter-spacing:4px;margin:15px 0;text-transform:uppercase;text-align:center;text-shadow:0 0 10px rgba(0,229,255,0.3)}
+  #header{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:20px;font-size:12px;font-weight:600}
+  #main{display:flex;gap:20px;flex-wrap:wrap;justify-content:center;width:100%;max-width:1200px}
+  canvas#radar{border:1px solid rgba(0,180,216,0.3);border-radius:8px;background:#050E18;width:100%;max-width:800px;box-shadow:0 8px 32px rgba(0,0,0,0.4);display:block;aspect-ratio:800/460}
+  #panel{background:#111e2b;border:1px solid rgba(0,180,216,0.3);border-radius:8px;padding:20px;flex:1;min-width:300px;max-width:360px;box-shadow:0 8px 32px rgba(0,0,0,0.3)}
+  .ptitle{color:#00B4D8;font-size:12px;font-weight:700;letter-spacing:2px;margin-bottom:15px;text-align:center}
+  .sbox{border-radius:6px;padding:15px;margin-bottom:15px;border:1px solid currentColor;transition:all .3s ease;text-align:center;background:rgba(0,0,0,0.2)}
   .sbox.critical{animation:critPulse 1s infinite}
-  @keyframes critPulse{0%,100%{box-shadow:0 0 8px rgba(231,76,60,0.5)}50%{box-shadow:0 0 20px rgba(231,76,60,0.9)}}
-  .slbl{font-size:10px;letter-spacing:1px;opacity:.7;margin-bottom:4px}
-  .sval{font-size:18px;font-weight:bold}
-  .row{display:flex;justify-content:space-between;font-size:12px;padding:6px 0;border-bottom:1px solid #1C3354}
-  .rl{color:#6A8FAA}.rv{color:#B8D4E8;font-weight:bold}
-  #log{margin-top:10px;background:#0A1828;border-radius:4px;padding:8px;font-size:10px;height:100px;overflow-y:auto}
-  .le{color:#6A8FAA;padding:2px 0}.le.ch{color:#00B4D8;font-weight:bold}
-  #cd{display:inline-block;width:8px;height:8px;border-radius:50%;background:#E74C3C;animation:pulse 1.5s infinite}
+  @keyframes critPulse{0%,100%{box-shadow:0 0 10px rgba(231,76,60,0.5)}50%{box-shadow:0 0 25px rgba(231,76,60,0.9)}}
+  .slbl{font-size:11px;letter-spacing:1px;opacity:.7;margin-bottom:5px;font-weight:600}
+  .sval{font-size:22px;font-weight:800;letter-spacing:1px}
+  
+  #metrics{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:15px}
+  .metric-card{background:#0a131c;border:1px solid rgba(0,180,216,0.15);border-radius:6px;padding:12px 5px;display:flex;flex-direction:column;align-items:center;justify-content:center}
+  .metric-card.full{grid-column:1 / -1}
+  .m-lbl{font-size:10px;color:#8AAFC8;letter-spacing:1px;margin-bottom:4px;font-weight:600}
+  .m-val{font-size:15px;font-weight:bold;color:#e2ecf3;font-family:'Courier New',monospace}
+  
+  #log{background:#050a0f;border-radius:6px;padding:10px;font-size:11px;height:110px;overflow-y:auto;font-family:'Courier New',monospace;border:1px solid rgba(0,180,216,0.15)}
+  .le{color:#6A8FAA;padding:3px 0;border-bottom:1px solid rgba(255,255,255,0.03)}.le.ch{color:#00e5ff;font-weight:bold}
+  #cd{display:inline-block;width:10px;height:10px;border-radius:50%;background:#E74C3C;animation:pulse 1.5s infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
-  #cd.live{background:#2ECC71;animation:none}
-  #graphs{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin-top:16px;width:100%;max-width:900px}
-  .gb{background:#152638;border:1px solid #0077A8;border-radius:4px;padding:8px;flex:1;min-width:260px}
-  .gt{font-size:10px;color:#6A8FAA;letter-spacing:1px;margin-bottom:6px}
-  canvas.ch{width:100%;height:70px;background:#0A1828}
+  #cd.live{background:#2ECC71;animation:none;box-shadow:0 0 8px #2ECC71}
+  #graphs{display:flex;gap:20px;flex-wrap:wrap;justify-content:center;margin-top:20px;width:100%;max-width:1200px}
+  .gb{background:#111e2b;border:1px solid rgba(0,180,216,0.3);border-radius:8px;padding:15px;flex:1;min-width:300px;box-shadow:0 8px 32px rgba(0,0,0,0.3)}
+  .gt{font-size:11px;color:#8AAFC8;font-weight:600;letter-spacing:1px;margin-bottom:10px}
+  canvas.ch{width:100%;height:80px;background:#050a0f;border-radius:4px;border:1px solid rgba(0,180,216,0.1);display:block}
+  #banner{background:linear-gradient(135deg,#132230,#0d1822);border:1px solid rgba(0,180,216,0.4);border-radius:8px;padding:12px 18px;margin-bottom:20px;font-size:13px;display:flex;align-items:center;justify-content:space-between;gap:15px;max-width:1200px;width:100%;animation:fadeIn .5s ease;box-shadow:0 4px 15px rgba(0,0,0,0.4)}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:translateY(0)}}
+  #banner .bt{color:#e2ecf3;line-height:1.5}
+  #banner .bt b{color:#00e5ff}
+  #banner .bx{background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1);color:#e2ecf3;cursor:pointer;border-radius:4px;padding:4px 10px;font-size:16px;transition:all .2s ease}
+  #banner .bx:hover{background:rgba(231,76,60,0.2);border-color:#E74C3C;color:#E74C3C}
+  #ab{background:rgba(0,180,216,0.1);border:1px solid #00B4D8;color:#00e5ff;padding:6px 14px;border-radius:6px;cursor:pointer;font-family:inherit;font-weight:700;font-size:11px;letter-spacing:1px;transition:all .3s ease;margin-left:10px;text-transform:uppercase}
+  #ab:hover{background:rgba(0,180,216,0.25);box-shadow:0 0 12px rgba(0,180,216,0.4)}
+  #ab.on{background:rgba(46,204,113,0.15);border-color:#2ECC71;color:#2ECC71;box-shadow:none;cursor:default}
+  .hidden{display:none!important}
 </style>
 </head>
 <body>
 <h1>CANAL FLOOD AND WASTE RADAR</h1>
-<div id="header"><span id="cd"></span><span id="cl">Connecting...</span></div>
+<div id="header"><span id="cd"></span><span id="cl">Connecting...</span><button id="ab" onclick="enableAudio()">ENABLE ALERTS</button></div>
+<div id="banner">
+  <div class="bt">For uninterrupted monitoring, open your full browser and visit <b>http://192.168.4.1</b></div>
+  <button class="bx" onclick="this.parentElement.classList.add('hidden')">&times;</button>
+</div>
 
 <div id="main">
-  <canvas id="radar" width="560" height="340"></canvas>
+  <canvas id="radar"></canvas>
   <div id="panel">
     <div class="ptitle">SYSTEM STATUS</div>
     <div class="sbox" id="sb"><div class="slbl">CONFIRMED STATUS</div><div class="sval" id="sv">---</div></div>
-    <div class="row"><span class="rl">ANGLE</span><span class="rv" id="ra">---</span></div>
-    <div class="row"><span class="rl">DISTANCE</span><span class="rv" id="rd">---</span></div>
-    <div class="row"><span class="rl">DEPTH</span><span class="rv" id="rp">---</span></div>
-    <div class="row"><span class="rl">VARIANCE</span><span class="rv" id="rr">---</span></div>
-    <div class="row"><span class="rl">OBSTRUCTION</span><span class="rv" id="ro">---</span></div>
+    <div id="metrics">
+      <div class="metric-card"><div class="m-lbl">ANGLE</div><div class="m-val" id="ra">---</div></div>
+      <div class="metric-card"><div class="m-lbl">DISTANCE</div><div class="m-val" id="rd">---</div></div>
+      <div class="metric-card"><div class="m-lbl">DEPTH</div><div class="m-val" id="rp">---</div></div>
+      <div class="metric-card"><div class="m-lbl">VARIANCE</div><div class="m-val" id="rr">---</div></div>
+      <div class="metric-card full"><div class="m-lbl">OBSTRUCTION</div><div class="m-val" id="ro">---</div></div>
+    </div>
     <div id="log"></div>
   </div>
 </div>
@@ -154,7 +170,18 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <script>
 var MD=20,SM=25,SX=155,SS=SX-SM+1,MSA=400;
 var rc=document.getElementById('radar'),cx=rc.getContext('2d');
-var CX=rc.width/2,CY=rc.height-30,R=Math.min(CX-20,CY-20);
+
+var dpr=window.devicePixelRatio||1;
+var CX,CY,R;
+
+function initRadar(){
+  var w=rc.clientWidth,h=rc.clientHeight;
+  if(w<100)w=800; if(h<60)h=460;
+  rc.width=Math.round(w*dpr);rc.height=Math.round(h*dpr);
+  cx.setTransform(dpr,0,0,dpr,0,0);
+  CX=w/2;CY=h-30;R=Math.min(CX-20,CY-20);
+}
+initRadar();
 var sw=SM;
 
 // Per-angle scan memory
@@ -206,7 +233,8 @@ function toXY(a,d){
 }
 
 function drawRadar(){
-  cx.clearRect(0,0,rc.width,rc.height);
+  var w=rc.width/dpr,h=rc.height/dpr;
+  cx.clearRect(0,0,w,h);
 
   // Background semicircle
   cx.fillStyle='#050E18';
@@ -218,17 +246,18 @@ function drawRadar(){
     var rr=R*rings[i];
     cx.beginPath();cx.arc(CX,CY,rr,Math.PI,2*Math.PI);
     cx.strokeStyle='rgba(0,200,120,0.25)';cx.lineWidth=.5;cx.stroke();
-    cx.fillStyle='rgba(0,255,120,0.6)';cx.font='10px Courier New';cx.textAlign='center';
-    cx.fillText((MD*rings[i]).toFixed(0)+'cm',CX,CY-rr-5);
+    cx.fillStyle='rgba(0,255,120,0.6)';cx.font='11px Courier New';cx.textAlign='left';
+    cx.fillText((MD*rings[i]).toFixed(0)+'cm',CX+4,CY-rr+14);
   }
 
   // Radial spokes
+  cx.textAlign='center';
   for(var d=30;d<=150;d+=30){
     var p=toXY(d,MD);
     cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(p.x,p.y);
     cx.strokeStyle='rgba(0,200,120,0.25)';cx.lineWidth=.5;cx.stroke();
-    var lp=toXY(d,MD*1.08);
-    cx.fillStyle='rgba(0,255,120,0.7)';
+    var lp=toXY(d,MD*1.12);
+    cx.fillStyle='rgba(0,255,120,0.7)';cx.font='11px Courier New';
     cx.fillText(d+'\u00b0',lp.x,lp.y);
   }
 
@@ -310,9 +339,6 @@ function drawRadar(){
   cx.fillStyle=sc;cx.font='bold 11px Courier New';cx.textAlign='left';
   cx.fillText(sys.confirmed,8,16);
 
-  // Info label
-  cx.fillStyle='#4A6A7A';cx.font='10px Courier New';cx.textAlign='center';
-  cx.fillText('HC-SR04  |  130\u00b0 ARC  |  MAX '+MD.toFixed(0)+'cm',CX,CY+16);
 }
 
 function uPanel(){
@@ -334,6 +360,7 @@ function uPanel(){
   if(sys.confirmed!==lastC&&lastC!==''){
     aLog('STATUS: '+lastC+' -> '+sys.confirmed,true);
   }
+  updateAlarm(sys.confirmed);
   lastC=sys.confirmed;
 }
 
@@ -410,8 +437,59 @@ function connect(){
   };
 }
 
+// ── Audio Alarm System ──────────────────────────────────────
+var audioCtx=null,audioOn=false,alarmInt=null,lastAlarm='';
+
+function enableAudio(){
+  if(audioOn)return;
+  audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+  audioOn=true;
+  var b=document.getElementById('ab');
+  b.textContent='ALERTS ACTIVE';b.className='on';
+  playTone(440,150,0.1);
+}
+
+function playTone(f,dur,vol){
+  if(!audioCtx||!audioOn)return;
+  var o=audioCtx.createOscillator(),g=audioCtx.createGain();
+  o.connect(g);g.connect(audioCtx.destination);
+  o.frequency.value=f;o.type='square';g.gain.value=vol||0.12;
+  o.start();
+  g.gain.exponentialRampToValueAtTime(0.001,audioCtx.currentTime+dur/1000);
+  o.stop(audioCtx.currentTime+dur/1000);
+}
+
+function playWaste(){
+  playTone(800,250,0.12);
+  setTimeout(function(){playTone(800,250,0.12);},400);
+}
+
+function playCritical(){
+  playTone(1000,180,0.15);
+  setTimeout(function(){playTone(600,180,0.15);},220);
+  setTimeout(function(){playTone(1000,180,0.15);},440);
+  setTimeout(function(){playTone(600,180,0.15);},660);
+}
+
+function updateAlarm(s){
+  if(!audioOn)return;
+  if(s===lastAlarm)return;
+  lastAlarm=s;
+  if(alarmInt){clearInterval(alarmInt);alarmInt=null;}
+  if(s==='Waste Detected'){
+    playWaste();alarmInt=setInterval(playWaste,3000);
+  }else if(s==='Critical Flood Risk'){
+    playCritical();alarmInt=setInterval(playCritical,2000);
+  }
+}
+
 connect();
 render();
+var resizeTimer;
+window.addEventListener('resize',function(){
+  clearTimeout(resizeTimer);
+  resizeTimer=setTimeout(function(){dpr=window.devicePixelRatio||1;initRadar();},200);
+});
 </script>
 </body>
 </html>
@@ -439,8 +517,6 @@ float readUltrasonic() {
   return distance;
 }
 
-// FIX 4: Take 3 readings and return the median, with consistency check.
-// Eliminates single-reading spikes from multi-path reflections.
 float readUltrasonicMedian() {
   float r[3];
   for (int i = 0; i < 3; i++) {
@@ -468,7 +544,6 @@ float readUltrasonicMedian() {
   return r[1];
 }
 
-// FIX 1 & 2: Accept raw=4095 as valid (max water level), use float mapping
 float readWaterLevel() {
   digitalWrite(WL_VCC_PIN, HIGH);
   delayMicroseconds(500);
@@ -576,7 +651,6 @@ Status classify(float depth, float variance, float meanDelta, bool obstruction) 
   return NORMAL;
 }
 
-// FIX 5: Asymmetric debounce — 2 to escalate, 5 to de-escalate
 void updateDebounce(Status raw) {
   if (raw == candidateStatus) {
     candidateCount++;
@@ -696,13 +770,37 @@ void setup() {
   Serial.print("IP: ");
   Serial.println(WiFi.softAPIP());
 
+  // Captive Portal: redirect all DNS queries to our IP
+  dnsServer.start(53, "*", WiFi.softAPIP());
+  Serial.println("DNS server started (captive portal).");
+
   ws.onEvent(onWsEvent);
   server.addHandler(&ws);
   server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
     request->send_P(200, "text/html", INDEX_HTML);
   });
+
+  // Captive portal detection endpoints (Android / iOS / Windows)
+  server.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest* request) {
+    request->redirect("http://192.168.4.1/");
+  });
+  server.on("/hotspot-detect.html", HTTP_GET, [](AsyncWebServerRequest* request) {
+    request->redirect("http://192.168.4.1/");
+  });
+  server.on("/connecttest.txt", HTTP_GET, [](AsyncWebServerRequest* request) {
+    request->redirect("http://192.168.4.1/");
+  });
+  server.on("/fwlink", HTTP_GET, [](AsyncWebServerRequest* request) {
+    request->redirect("http://192.168.4.1/");
+  });
+
+  // Catch-all: redirect any unknown URL to dashboard
+  server.onNotFound([](AsyncWebServerRequest* request) {
+    request->redirect("http://192.168.4.1/");
+  });
+
   server.begin();
-  Serial.println("Web server ready.");
+  Serial.println("Web server ready (captive portal active).");
 
   ESP32PWM::allocateTimer(0);
   ESP32PWM::allocateTimer(1);
@@ -731,6 +829,7 @@ void setup() {
 }
 
 void loop() {
+  dnsServer.processNextRequest();
   unsigned long now = millis();
   if (now - lastStepTime < STEP_INTERVAL_MS) {
     delay(1);
