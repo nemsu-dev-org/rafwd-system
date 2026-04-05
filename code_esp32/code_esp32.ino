@@ -30,6 +30,7 @@ const float MAX_DETECTION_RANGE_CM = 20.0;
 const int SWEEP_MIN  = 25;
 const int SWEEP_MAX  = 155;
 const int SWEEP_STEP = 1;
+const int SWEEP_MARGIN = 3;  // Skip first/last 3° to avoid servo jitter on reversal
 const unsigned long STEP_INTERVAL_MS = 100;
 
 const float OBSTRUCT_THRESH  = 2.0;   // cm difference from baseline to flag obstruction
@@ -37,8 +38,14 @@ const float DEPTH_ELEVATED   = 10.0;  // cm water depth for ELEVATED
 const float DEPTH_CRITICAL   = 15.0;  // cm water depth for CRITICAL
 const float VARIANCE_THRESH  = 3.0;   // variance threshold for waste movement detection
 const float MEAN_DELTA_THRESH = 1.5;  // avg delta from baseline to flag stationary object
-const int   OBSTRUCTION_HOLD = 20;   // Hold obstruction for 20 steps (2 seconds) to cover close-range sensor blindness
+const int   OBSTRUCTION_HOLD = 5;    // Hold obstruction for 5 steps (0.5 seconds)
 const int   WL_READ_INTERVAL = 10;   // Read water level every 10 steps (1 second)
+
+// ── Clog Detection Settings ──────────────────────────────────
+const int   HISTORY_DEPTH       = 2;     // Readings per angle to track (activates after ~3 sweeps)
+const float STATIC_VAR_THRESH   = 2.0;   // Temporal variance threshold (tolerant of sensor noise)
+const float STATIC_DELTA_THRESH = 2.0;   // Minimum delta from baseline to be significant
+const int   CLOG_ANGLE_COUNT    = 3;     // Adjacent static angles to flag clog
 
 const float SIMULATED_WATER_DEPTH = 0.0;
 const float WL_EMA_ALPHA = 0.8;
@@ -56,10 +63,9 @@ int       bIdx    = 0;
 bool      bufFull = false;
 
 const int DEBOUNCE_ESCALATE   = 2;
-const int DEBOUNCE_DEESCALATE = 3;
+const int DEBOUNCE_DEESCALATE = 2;
 
-int noInRangeCount = 0;
-const int STALE_FLUSH_COUNT = 30;
+
 
 enum Status { NORMAL, ELEVATED, WASTE, CRITICAL };
 
@@ -75,6 +81,11 @@ Status confirmedStatus     = NORMAL;
 Status candidateStatus     = NORMAL;
 int    candidateCount      = 0;
 unsigned long lastStepTime = 0;
+
+// ── Clog Detection State ─────────────────────────────────────
+float angleHistory[BASELINE_STEPS][HISTORY_DEPTH];
+int   angleHistCount[BASELINE_STEPS];
+bool  isClogged           = false;
 
 // ── Server Instances ─────────────────────────────────────────────
 AsyncWebServer server(80);
@@ -108,6 +119,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
   .sbox{border-radius:6px;padding:15px;margin-bottom:15px;border:1px solid currentColor;transition:all .3s ease;text-align:center;background:rgba(0,0,0,0.2)}
   .sbox.critical{animation:critPulse 1s infinite}
   @keyframes critPulse{0%,100%{box-shadow:0 0 10px rgba(231,76,60,0.5)}50%{box-shadow:0 0 25px rgba(231,76,60,0.9)}}
+  .sbox.clogged{animation:clogPulse 1.5s infinite}
+  @keyframes clogPulse{0%,100%{box-shadow:0 0 10px rgba(211,84,0,0.5)}50%{box-shadow:0 0 25px rgba(211,84,0,0.9)}}
   .slbl{font-size:11px;letter-spacing:1px;opacity:.7;margin-bottom:5px;font-weight:600}
   .sval{font-size:22px;font-weight:800;letter-spacing:1px}
   
@@ -156,7 +169,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       <div class="metric-card"><div class="m-lbl">DISTANCE</div><div class="m-val" id="rd">---</div></div>
       <div class="metric-card"><div class="m-lbl">DEPTH</div><div class="m-val" id="rp">---</div></div>
       <div class="metric-card"><div class="m-lbl">VARIANCE</div><div class="m-val" id="rr">---</div></div>
-      <div class="metric-card full"><div class="m-lbl">OBSTRUCTION</div><div class="m-val" id="ro">---</div></div>
+
     </div>
     <div id="log"></div>
   </div>
@@ -194,7 +207,7 @@ var sConf=new Array(SS).fill('Normal');
 var trail=[];
 var TMAX=30;
 
-var sys={angle:90,dist:-1,depth:0,variance:0,obstr:false,confirmed:'Normal'};
+var sys={angle:90,dist:-1,depth:0,variance:0,obstr:false,confirmed:'Normal',clogged:false};
 var lastC='';
 var logE=document.getElementById('log');
 var HN=120,dH=new Float32Array(HN),vH=new Float32Array(HN),hI=0;
@@ -203,6 +216,7 @@ function sCol(s){
   if(s==='Normal')return'#2ECC71';
   if(s==='Elevated')return'#F1C40F';
   if(s==='Waste Detected')return'#E67E22';
+  if(s==='Waste Detected (Clogged)')return'#D35400';
   if(s==='Critical Flood Risk')return'#E74C3C';
   return'#6A8FAA';
 }
@@ -210,6 +224,7 @@ function sRGB(s){
   if(s==='Normal')return[46,204,113];
   if(s==='Elevated')return[241,196,15];
   if(s==='Waste Detected')return[230,126,34];
+  if(s==='Waste Detected (Clogged)')return[211,84,0];
   if(s==='Critical Flood Risk')return[231,76,60];
   return[106,143,170];
 }
@@ -345,7 +360,9 @@ function uPanel(){
   var c=sCol(sys.confirmed);
   var sb=document.getElementById('sb');
   sb.style.borderColor=c;sb.style.backgroundColor=c+'20';
-  sb.className='sbox'+(sys.confirmed==='Critical Flood Risk'?' critical':'');
+  if(sys.confirmed==='Critical Flood Risk')sb.className='sbox critical';
+  else if(sys.confirmed==='Waste Detected (Clogged)')sb.className='sbox clogged';
+  else sb.className='sbox';
   var sv=document.getElementById('sv');
   sv.style.color=c;sv.textContent=sys.confirmed;
 
@@ -353,9 +370,6 @@ function uPanel(){
   document.getElementById('rd').textContent=(sys.dist>0&&sys.dist<=MD)?sys.dist.toFixed(1)+' cm':'NO ECHO';
   document.getElementById('rp').textContent=sys.depth.toFixed(1)+' cm';
   document.getElementById('rr').textContent=sys.variance.toFixed(2);
-  var ro=document.getElementById('ro');
-  ro.textContent=sys.obstr?'DETECTED':'CLEAR';
-  ro.style.color=sys.obstr?'#E74C3C':'#2ECC71';
 
   if(sys.confirmed!==lastC&&lastC!==''){
     aLog('STATUS: '+lastC+' -> '+sys.confirmed,true);
@@ -409,6 +423,7 @@ function connect(){
       if(p.variance!==undefined)sys.variance=p.variance;
       if(p.obstr!==undefined)sys.obstr=p.obstr;
       if(p.confirmed!==undefined)sys.confirmed=p.confirmed;
+      if(p.clogged!==undefined)sys.clogged=p.clogged;
 
       // Update per-angle scan data with status
       var idx=sys.angle-SM;
@@ -446,29 +461,55 @@ function enableAudio(){
   audioOn=true;
   var b=document.getElementById('ab');
   b.textContent='ALERTS ACTIVE';b.className='on';
-  playTone(440,150,0.1);
+  playChime();
 }
 
-function playTone(f,dur,vol){
+function playTone(f,dur,vol,type){
   if(!audioCtx||!audioOn)return;
   var o=audioCtx.createOscillator(),g=audioCtx.createGain();
   o.connect(g);g.connect(audioCtx.destination);
-  o.frequency.value=f;o.type='square';g.gain.value=vol||0.12;
+  o.frequency.value=f;o.type=type||'sine';g.gain.value=vol||0.12;
   o.start();
   g.gain.exponentialRampToValueAtTime(0.001,audioCtx.currentTime+dur/1000);
   o.stop(audioCtx.currentTime+dur/1000);
 }
 
+function playChime(){
+  playTone(523,150,0.08,'sine');
+  setTimeout(function(){playTone(659,150,0.08,'sine');},160);
+  setTimeout(function(){playTone(784,200,0.08,'sine');},320);
+}
+
+function playElevated(){
+  playTone(440,180,0.08,'sine');
+  setTimeout(function(){playTone(554,180,0.08,'sine');},220);
+}
+
 function playWaste(){
-  playTone(800,250,0.12);
-  setTimeout(function(){playTone(800,250,0.12);},400);
+  playTone(740,100,0.12,'triangle');
+  setTimeout(function(){playTone(740,100,0.12,'triangle');},180);
+  setTimeout(function(){playTone(880,140,0.12,'triangle');},360);
+}
+
+function playClogged(){
+  playTone(900,180,0.13,'sawtooth');
+  setTimeout(function(){playTone(700,180,0.13,'sawtooth');},250);
+  setTimeout(function(){playTone(500,300,0.15,'sawtooth');},500);
 }
 
 function playCritical(){
-  playTone(1000,180,0.15);
-  setTimeout(function(){playTone(600,180,0.15);},220);
-  setTimeout(function(){playTone(1000,180,0.15);},440);
-  setTimeout(function(){playTone(600,180,0.15);},660);
+  if(!audioCtx||!audioOn)return;
+  var now=audioCtx.currentTime;
+  var o=audioCtx.createOscillator(),g=audioCtx.createGain();
+  var lfo=audioCtx.createOscillator(),lfoG=audioCtx.createGain();
+  o.connect(g);g.connect(audioCtx.destination);
+  lfo.connect(lfoG);lfoG.connect(o.frequency);
+  o.frequency.value=800;o.type='sawtooth';
+  lfo.frequency.value=8;lfoG.gain.value=400;
+  g.gain.value=0.15;
+  o.start(now);lfo.start(now);
+  g.gain.exponentialRampToValueAtTime(0.001,now+0.9);
+  o.stop(now+0.9);lfo.stop(now+0.9);
 }
 
 function updateAlarm(s){
@@ -476,8 +517,12 @@ function updateAlarm(s){
   if(s===lastAlarm)return;
   lastAlarm=s;
   if(alarmInt){clearInterval(alarmInt);alarmInt=null;}
-  if(s==='Waste Detected'){
+  if(s==='Elevated'){
+    playElevated();alarmInt=setInterval(playElevated,5000);
+  }else if(s==='Waste Detected'){
     playWaste();alarmInt=setInterval(playWaste,3000);
+  }else if(s==='Waste Detected (Clogged)'){
+    playClogged();alarmInt=setInterval(playClogged,2500);
   }else if(s==='Critical Flood Risk'){
     playCritical();alarmInt=setInterval(playCritical,2000);
   }
@@ -596,6 +641,8 @@ void calibrateBaseline() {
 
 bool isObstructed(int angle, float dist) {
   if (!baselineReady || dist < 0) return false;
+  // Skip boundary angles where servo jitter causes unreliable readings
+  if (angle <= SWEEP_MIN + SWEEP_MARGIN || angle >= SWEEP_MAX - SWEEP_MARGIN) return false;
   // Reading beyond detection range — can't reliably determine obstruction
   if (dist > MAX_DETECTION_RANGE_CM) return false;
   int idx = (angle - SWEEP_MIN) / SWEEP_STEP;
@@ -642,6 +689,53 @@ float calcMeanDelta() {
   return sum / BUF_SIZE;
 }
 
+// Track per-angle delta history for clog detection
+void updateAngleHistory(int angle, float dist) {
+  if (!baselineReady || dist < 0 || dist > MAX_DETECTION_RANGE_CM) return;
+  // Skip boundary angles where servo jitter causes unreliable readings
+  if (angle <= SWEEP_MIN + SWEEP_MARGIN || angle >= SWEEP_MAX - SWEEP_MARGIN) return;
+  int idx = (angle - SWEEP_MIN) / SWEEP_STEP;
+  if (idx < 0 || idx >= BASELINE_STEPS) return;
+  float delta = fabs(baseline[idx] - dist);
+  int hi = angleHistCount[idx] % HISTORY_DEPTH;
+  angleHistory[idx][hi] = delta;
+  if (angleHistCount[idx] < HISTORY_DEPTH * 100) angleHistCount[idx]++;
+}
+
+// Evaluate clog status at each sweep boundary
+void checkClogStatus() {
+  int consecutive = 0;
+  int maxConsecutive = 0;
+
+  for (int i = 0; i < BASELINE_STEPS; i++) {
+    if (angleHistCount[i] < HISTORY_DEPTH) {
+      consecutive = 0;
+      continue;
+    }
+    // Calculate mean and temporal variance of recent deltas at this angle
+    float mean = 0.0;
+    for (int j = 0; j < HISTORY_DEPTH; j++) mean += angleHistory[i][j];
+    mean /= HISTORY_DEPTH;
+
+    float var = 0.0;
+    for (int j = 0; j < HISTORY_DEPTH; j++) var += pow(angleHistory[i][j] - mean, 2);
+    var /= HISTORY_DEPTH;
+
+    // Static = consistently high delta with low variance (object not moving)
+    if (var < STATIC_VAR_THRESH && mean > STATIC_DELTA_THRESH) {
+      consecutive++;
+      if (consecutive > maxConsecutive) maxConsecutive = consecutive;
+    } else {
+      consecutive = 0;
+    }
+  }
+
+  isClogged = (maxConsecutive >= CLOG_ANGLE_COUNT);
+  if (isClogged) {
+    Serial.printf("[CLOG] Detected %d adjacent static angles\n", maxConsecutive);
+  }
+}
+
 Status classify(float depth, float variance, float meanDelta, bool obstruction) {
   bool wasteFlag = variance > VARIANCE_THRESH || obstruction || meanDelta > MEAN_DELTA_THRESH;
   if (depth >= DEPTH_CRITICAL) return CRITICAL;
@@ -674,46 +768,80 @@ void updateDebounce(Status raw) {
   }
 
   if (candidateCount >= needed) {
+    Status prev = confirmedStatus;
     confirmedStatus = candidateStatus;
     candidateCount  = needed;
+
+    // On any transition to NORMAL: flush all detection data for clean slate
+    // Prevents stale history from causing false re-triggers
+    if (confirmedStatus == NORMAL && prev != NORMAL) {
+      for (int i = 0; i < BUF_SIZE; i++) buf[i] = 0.0;
+      bIdx = 0;
+      bufFull = false;
+      memset(angleHistCount, 0, sizeof(angleHistCount));
+      isClogged = false;
+      obstructionTimer = 0;
+      obstructionDetected = false;
+    }
   }
 }
 
 void setOutput(Status s) {
   unsigned long now = millis();
-  bool blinkState = (now / 500) % 2 == 0; // 500ms ON, 500ms OFF
-  bool fastBlink  = (now / 150) % 2 == 0; // 150ms for two-tone critical alarm
+  bool blinkState = (now / 500) % 2 == 0;
 
-  digitalWrite(LED_GREEN,  (s == NORMAL) ? HIGH : LOW);
-  
-  if (s == WASTE) {
+  // ── LEDs ──
+  digitalWrite(LED_GREEN, (s == NORMAL) ? HIGH : LOW);
+
+  if (s == WASTE && isClogged) {
+    // Clogged: fast yellow blink + slow red blink
+    bool fastBlink = (now / 200) % 2 == 0;
+    digitalWrite(LED_YELLOW, fastBlink ? HIGH : LOW);
+    digitalWrite(LED_RED, blinkState ? HIGH : LOW);
+  } else if (s == WASTE) {
     digitalWrite(LED_YELLOW, blinkState ? HIGH : LOW);
+    digitalWrite(LED_RED, LOW);
   } else {
     digitalWrite(LED_YELLOW, (s == ELEVATED) ? HIGH : LOW);
+    digitalWrite(LED_RED, (s == CRITICAL) ? HIGH : LOW);
   }
-  
-  digitalWrite(LED_RED,    (s == CRITICAL) ? HIGH : LOW);
 
-  if (s == WASTE) {
-    if (blinkState) {
-      // 3000Hz is near the resonant frequency of most passive buzzers (much louder)
+  // ── Buzzer (passive — distinct patterns per status) ──
+  if (s == NORMAL) {
+    ledcWriteTone(BUZZER_PIN, 0);
+    ledcWrite(BUZZER_PIN, 0);
+  } else if (s == ELEVATED) {
+    // Short chirp every 3 seconds
+    unsigned long cycle = now % 3000;
+    if (cycle < 100) {
+      ledcWriteTone(BUZZER_PIN, 2500);
+    } else {
+      ledcWriteTone(BUZZER_PIN, 0);
+      ledcWrite(BUZZER_PIN, 0);
+    }
+  } else if (s == WASTE && !isClogged) {
+    // Double chirp every 2 seconds
+    unsigned long cycle = now % 2000;
+    if (cycle < 100 || (cycle > 200 && cycle < 300)) {
       ledcWriteTone(BUZZER_PIN, 3000);
     } else {
       ledcWriteTone(BUZZER_PIN, 0);
       ledcWrite(BUZZER_PIN, 0);
     }
-  } else if (s == CRITICAL) {
-    // Unique two-tone piercing alarm (Hi-Lo siren) for critical state
-    if (fastBlink) {
-      ledcWriteTone(BUZZER_PIN, 4000);
+  } else if (s == WASTE && isClogged) {
+    // Rising warble every 1.5 seconds
+    unsigned long cycle = now % 1500;
+    if (cycle < 400) {
+      int freq = 2000 + (int)((cycle / 400.0) * 1500.0);
+      ledcWriteTone(BUZZER_PIN, freq);
     } else {
-      ledcWriteTone(BUZZER_PIN, 3000);
+      ledcWriteTone(BUZZER_PIN, 0);
+      ledcWrite(BUZZER_PIN, 0);
     }
-  } else {
-    // ledcWriteTone(pin, 0) doesn't reliably stop on all ESP32 cores.
-    // Force duty cycle to 0 to guarantee silence.
-    ledcWriteTone(BUZZER_PIN, 0);
-    ledcWrite(BUZZER_PIN, 0);
+  } else if (s == CRITICAL) {
+    // Fast alternating siren (4500/3000 Hz at 120ms)
+    bool phase = (now / 120) % 2 == 0;
+    ledcWriteTone(BUZZER_PIN, phase ? 4500 : 3000);
   }
 }
 
@@ -721,7 +849,7 @@ const char* statusLabel(Status s) {
   switch (s) {
     case NORMAL:   return "Normal";
     case ELEVATED: return "Elevated";
-    case WASTE:    return "Waste Detected";
+    case WASTE:    return isClogged ? "Waste Detected (Clogged)" : "Waste Detected";
     case CRITICAL: return "Critical Flood Risk";
     default:       return "Unknown";
   }
@@ -752,6 +880,7 @@ void pushLiveData() {
   doc["variance"]  = calcVariance();
   doc["obstr"]     = obstructionDetected;
   doc["confirmed"] = statusLabel(confirmedStatus);
+  doc["clogged"]   = isClogged;
 
   String payload;
   serializeJson(doc, payload);
@@ -823,6 +952,8 @@ void setup() {
   ledcAttach(BUZZER_PIN, 2000, 8);
 
   for (int i = 0; i < BUF_SIZE; i++) buf[i] = 0.0;  // Zero delta = calm baseline
+  memset(angleHistory, 0, sizeof(angleHistory));
+  memset(angleHistCount, 0, sizeof(angleHistCount));
   setOutput(NORMAL);
   calibrateBaseline();
   lastStepTime = millis();
@@ -837,26 +968,28 @@ void loop() {
   }
   lastStepTime = now;
 
+  int prevSweepDir = sweepDir;
   stepServo();
   currentDist = readUltrasonicMedian();
 
-  // Push delta-from-baseline for valid in-range readings
-  if (currentDist > 0 && currentDist <= MAX_DETECTION_RANGE_CM) {
-    pushReading(currentDist, sweepAngle);
-    noInRangeCount = 0;
-  } else {
-    // Track consecutive out-of-range readings
-    noInRangeCount++;
-    if (noInRangeCount >= STALE_FLUSH_COUNT && bufFull) {
-      // Buffer has stale data from old detections — flush to calm state
-      for (int i = 0; i < BUF_SIZE; i++) buf[i] = 0.0;
-      bIdx = 0;
-      bufFull = false;
-      noInRangeCount = 0;
-    }
+  // Detect sweep boundary (direction changed) — run clog analysis
+  if (sweepDir != prevSweepDir) {
+    checkClogStatus();
   }
 
-  // Obstruction with short hold timer — clears ~500ms after object is removed
+  // Push delta-from-baseline for in-range readings; push zero for out-of-range
+  if (currentDist > 0 && currentDist <= MAX_DETECTION_RANGE_CM) {
+    pushReading(currentDist, sweepAngle);
+    updateAngleHistory(sweepAngle, currentDist);
+  } else if (!obstructionDetected) {
+    // No object in range and no active obstruction — push zero delta
+    // to naturally flush old detections from the buffer
+    buf[bIdx % BUF_SIZE] = 0.0;
+    bIdx++;
+    if (bIdx >= BUF_SIZE) bufFull = true;
+  }
+
+  // Obstruction with hold timer — persists across a full sweep cycle
   if (isObstructed(sweepAngle, currentDist)) {
     obstructionTimer = OBSTRUCTION_HOLD;
   }
@@ -867,12 +1000,16 @@ void loop() {
     obstructionDetected = false;
   }
 
+
   // Read water level frequently (~1s) or every step if already alerting
   int currentInterval = (confirmedStatus != NORMAL) ? 1 : WL_READ_INTERVAL;
   if (++stepCount >= currentInterval) {
+    // Silence buzzer during ADC read to prevent PWM noise coupling
+    ledcWriteTone(BUZZER_PIN, 0);
+    ledcWrite(BUZZER_PIN, 0);
+    delayMicroseconds(200);  // Let noise settle
     float rawDepth = readWaterLevel();
     if (rawDepth >= 0.0) {
-      // EMA smoothing: eliminates ADC jitter while staying responsive
       waterDepth = WL_EMA_ALPHA * rawDepth + (1.0 - WL_EMA_ALPHA) * waterDepth;
     }
     stepCount = 0;
@@ -888,7 +1025,7 @@ void loop() {
 
   pushLiveData();
 
-  Serial.printf("A:%d D:%.1f Dp:%.1f V:%.2f M:%.2f O:%d S:%s\n",
+  Serial.printf("A:%d D:%.1f Dp:%.1f V:%.2f M:%.2f O:%d C:%d S:%s\n",
                 sweepAngle, currentDist, waterDepth, variance, meanDelta,
-                obstructionDetected, statusLabel(confirmedStatus));
+                obstructionDetected, isClogged, statusLabel(confirmedStatus));
 }
