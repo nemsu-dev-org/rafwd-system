@@ -2,4 +2,7 @@
 ![icon](https://github.com/user-attachments/assets/fc2d174b-2de3-42ce-8d4b-fb21dfcca55a)
 
 ## Project Description
-***Warning!*** This project may cause spontaneous canal-cleansing actions and sudden urges to rescue unsuspecting ducks from floating debris. Proceed with caution! This ESP32-based masterpiece is like the Nazi regime of canal monitoring systems. It's going to conquer the flooding problem once and for all, leaving nothing but clean, waste-free waters in its wake! So grab your cooler and join us on this daring mission to rid our drainage canals of the foul scourge that plagues them. Together, we shall overcome!
+
+<p align="center">
+  Oh, hail Hitler! Presenting the nein ideas, ich mean ninth ideas of ours for our Nazi regime to had this nein advance canal surveillance systems using ESP32. It's going to conquer the flooding problem once and for all. Let's take a look at some of these ingenious designs, straight outta der canal-überwachung headquarters!
+</p>
