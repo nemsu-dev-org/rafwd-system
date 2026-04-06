@@ -5,15 +5,9 @@
 #include <ESP32Servo.h>
 #include <DNSServer.h>
 
-// ═══════════════════════════════════════════════════════════════
-// CONFIGURATION — Change these constants to tune the system
-// ═══════════════════════════════════════════════════════════════
-
-// ── WiFi Access Point Credentials ──────────────────────────────
 const char* AP_SSID     = "CanalMonitor";
 const char* AP_PASSWORD = "12345678";
 
-// ── Pin Assignments ──────────────────────────────────────────────
 const int SERVO_PIN    = 13;
 const int TRIG_PIN     = 14;
 const int ECHO_PIN     = 12;
@@ -24,35 +18,30 @@ const int LED_YELLOW   = 26;
 const int LED_RED      = 27;
 const int BUZZER_PIN   = 32;
 
-// ── Detection & Radar Settings ───────────────────────────────────
 const float MAX_DETECTION_RANGE_CM = 20.0;
 
 const int SWEEP_MIN  = 25;
 const int SWEEP_MAX  = 155;
 const int SWEEP_STEP = 1;
-const int SWEEP_MARGIN = 3;  // Skip first/last 3° to avoid servo jitter on reversal
+const int SWEEP_MARGIN = 3;
 const unsigned long STEP_INTERVAL_MS = 100;
 
-const float OBSTRUCT_THRESH  = 2.0;   // cm difference from baseline to flag obstruction
-const float DEPTH_ELEVATED   = 10.0;  // cm water depth for ELEVATED
-const float DEPTH_CRITICAL   = 15.0;  // cm water depth for CRITICAL
-const float VARIANCE_THRESH  = 3.0;   // variance threshold for waste movement detection
-const float MEAN_DELTA_THRESH = 1.5;  // avg delta from baseline to flag stationary object
-const int   OBSTRUCTION_HOLD = 5;    // Hold obstruction for 5 steps (0.5 seconds)
-const int   WL_READ_INTERVAL = 10;   // Read water level every 10 steps (1 second)
+const float OBSTRUCT_THRESH  = 2.0;
+const float DEPTH_ELEVATED   = 10.0;
+const float DEPTH_CRITICAL   = 15.0;
+const float VARIANCE_THRESH  = 3.0;
+const float MEAN_DELTA_THRESH = 1.5;
+const int   OBSTRUCTION_HOLD = 5;
+const int   WL_READ_INTERVAL = 10;
 
-// ── Clog Detection Settings ──────────────────────────────────
-const int   HISTORY_DEPTH       = 2;     // Readings per angle to track (activates after ~3 sweeps)
-const float STATIC_VAR_THRESH   = 2.0;   // Temporal variance threshold (tolerant of sensor noise)
-const float STATIC_DELTA_THRESH = 2.0;   // Minimum delta from baseline to be significant
-const int   CLOG_ANGLE_COUNT    = 3;     // Adjacent static angles to flag clog
+const int   HISTORY_DEPTH       = 2;
+const float STATIC_VAR_THRESH   = 2.0;
+const float STATIC_DELTA_THRESH = 2.0;
+const int   CLOG_ANGLE_COUNT    = 3;
 
 const float SIMULATED_WATER_DEPTH = 0.0;
 const float WL_EMA_ALPHA = 0.8;
 
-// ═══════════════════════════════════════════════════════════════
-// STATE VARIABLES
-// ═══════════════════════════════════════════════════════════════
 const int   BASELINE_STEPS = (SWEEP_MAX - SWEEP_MIN) / SWEEP_STEP + 1;
 float       baseline[BASELINE_STEPS];
 bool        baselineReady = false;
@@ -82,19 +71,14 @@ Status candidateStatus     = NORMAL;
 int    candidateCount      = 0;
 unsigned long lastStepTime = 0;
 
-// ── Clog Detection State ─────────────────────────────────────
 float angleHistory[BASELINE_STEPS][HISTORY_DEPTH];
 int   angleHistCount[BASELINE_STEPS];
 bool  isClogged           = false;
 
-// ── Server Instances ─────────────────────────────────────────────
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 DNSServer dnsServer;
 
-// ═══════════════════════════════════════════════════════════════
-// HTML INTERFACE (PROGMEM)
-// ═══════════════════════════════════════════════════════════════
 const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html lang="en">
@@ -197,13 +181,11 @@ function initRadar(){
 initRadar();
 var sw=SM;
 
-// Per-angle scan memory
 var sDist=new Float32Array(SS).fill(-1);
 var sAge=new Float32Array(SS).fill(9999);
 var sObs=new Uint8Array(SS).fill(0);
 var sConf=new Array(SS).fill('Normal');
 
-// Sweep trail
 var trail=[];
 var TMAX=30;
 
@@ -251,11 +233,9 @@ function drawRadar(){
   var w=rc.width/dpr,h=rc.height/dpr;
   cx.clearRect(0,0,w,h);
 
-  // Background semicircle
   cx.fillStyle='#050E18';
   cx.beginPath();cx.arc(CX,CY,R,Math.PI,2*Math.PI);cx.fill();
 
-  // Range rings
   var rings=[.25,.5,.75,1];
   for(var i=0;i<4;i++){
     var rr=R*rings[i];
@@ -265,7 +245,6 @@ function drawRadar(){
     cx.fillText((MD*rings[i]).toFixed(0)+'cm',CX+4,CY-rr+14);
   }
 
-  // Radial spokes
   cx.textAlign='center';
   for(var d=30;d<=150;d+=30){
     var p=toXY(d,MD);
@@ -276,11 +255,9 @@ function drawRadar(){
     cx.fillText(d+'\u00b0',lp.x,lp.y);
   }
 
-  // Baseline
   cx.beginPath();cx.moveTo(CX-R-8,CY);cx.lineTo(CX+R+8,CY);
   cx.strokeStyle='rgba(0,200,120,0.4)';cx.lineWidth=1;cx.stroke();
 
-  // ── GREEN FADING WAKE (recently scanned clear areas) ──
   for(var i=0;i<SS;i++){
     if(sAge[i]>=MSA)continue;
     var alpha=(1-sAge[i]/MSA)*0.18;
@@ -292,7 +269,6 @@ function drawRadar(){
     cx.lineWidth=1.5;cx.stroke();
   }
 
-  // ── DETECTION BLIPS (objects in range, colored by status) ──
   for(var i=0;i<SS;i++){
     if(sAge[i]>=MSA)continue;
     var dd=sDist[i];
@@ -304,12 +280,10 @@ function drawRadar(){
     var op=toXY(ang,dd);
     var ep=toXY(ang,MD);
 
-    // Line from object to edge
     cx.beginPath();cx.moveTo(op.x,op.y);cx.lineTo(ep.x,ep.y);
     cx.strokeStyle='rgba('+rgb[0]+','+rgb[1]+','+rgb[2]+','+(alpha*0.4).toFixed(3)+')';
     cx.lineWidth=2;cx.stroke();
 
-    // Detection dot
     if(alpha>0.08){
       cx.beginPath();cx.arc(op.x,op.y,2+alpha*2,0,2*Math.PI);
       cx.fillStyle='rgba('+rgb[0]+','+rgb[1]+','+rgb[2]+','+(alpha*0.85).toFixed(3)+')';
@@ -317,7 +291,6 @@ function drawRadar(){
     }
   }
 
-  // ── SWEEP TRAIL (fading wake behind sweep arm) ──
   for(var t=0;t<trail.length;t++){
     var a=((t+1)/trail.length)*0.3;
     var r2=toRad(trail[t]);
@@ -328,7 +301,6 @@ function drawRadar(){
     cx.lineWidth=1.5;cx.stroke();
   }
 
-  // ── MAIN SWEEP ARM with glow ──
   sw+=(sys.angle-sw)*0.3;
   var mr=toRad(sw),mx=CX+Math.cos(mr)*R,my=CY-Math.sin(mr)*R;
 
@@ -341,15 +313,12 @@ function drawRadar(){
   cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(mx,my);
   cx.strokeStyle='rgba(0,255,120,0.9)';cx.lineWidth=1.5;cx.stroke();
 
-  // Arc border
   cx.beginPath();cx.arc(CX,CY,R,Math.PI,2*Math.PI);
   cx.strokeStyle='#0077A8';cx.lineWidth=1.5;cx.stroke();
 
-  // Center dot
   cx.beginPath();cx.arc(CX,CY,5,0,2*Math.PI);
   cx.fillStyle='#00B4D8';cx.fill();
 
-  // Status label on radar
   var sc=sCol(sys.confirmed);
   cx.fillStyle=sc;cx.font='bold 11px Courier New';cx.textAlign='left';
   cx.fillText(sys.confirmed,8,16);
@@ -425,7 +394,6 @@ function connect(){
       if(p.confirmed!==undefined)sys.confirmed=p.confirmed;
       if(p.clogged!==undefined)sys.clogged=p.clogged;
 
-      // Update per-angle scan data with status
       var idx=sys.angle-SM;
       if(idx>=0&&idx<SS){
         sDist[idx]=sys.dist;
@@ -434,7 +402,6 @@ function connect(){
         sAge[idx]=0;
       }
 
-      // Sweep trail
       trail.push(sys.angle);
       if(trail.length>TMAX)trail.shift();
 
@@ -452,7 +419,6 @@ function connect(){
   };
 }
 
-// ── Audio Alarm System ──────────────────────────────────────
 var audioCtx=null,audioOn=false,alarmInt=null,lastAlarm='';
 
 function enableAudio(){
@@ -540,10 +506,6 @@ window.addEventListener('resize',function(){
 </html>
 )rawliteral";
 
-// ═══════════════════════════════════════════════════════════════
-// SENSOR & SYSTEM LOGIC
-// ═══════════════════════════════════════════════════════════════
-
 float readUltrasonic() {
   digitalWrite(TRIG_PIN, LOW);
   delayMicroseconds(2);
@@ -551,7 +513,6 @@ float readUltrasonic() {
   delayMicroseconds(10);
   digitalWrite(TRIG_PIN, LOW);
 
-  // Reduced timeout to 15000us (~250cm max) for faster sweep
   long duration = pulseIn(ECHO_PIN, HIGH, 15000);
   if (duration == 0) return -1.0;
 
@@ -568,7 +529,6 @@ float readUltrasonicMedian() {
     r[i] = readUltrasonic();
     if (i < 2) delay(8);
   }
-  // Simple sort for 3 elements
   for (int i = 0; i < 2; i++) {
     for (int j = i + 1; j < 3; j++) {
       if (r[j] < r[i]) {
@@ -578,10 +538,8 @@ float readUltrasonicMedian() {
       }
     }
   }
-  // Median is r[1]
   if (r[1] < 0) return -1.0;
 
-  // Require at least 2 of 3 readings to agree within 3cm
   bool p01 = (r[0] > 0 && r[1] > 0 && fabs(r[0] - r[1]) < 3.0);
   bool p12 = (r[1] > 0 && r[2] > 0 && fabs(r[1] - r[2]) < 3.0);
   if (!p01 && !p12) return -1.0;
@@ -596,10 +554,8 @@ float readWaterLevel() {
   int raw = analogRead(WL_DATA_PIN);
   digitalWrite(WL_VCC_PIN, LOW);
 
-  // Only reject truly invalid readings (no signal)
   if (raw <= 0) return -1.0;
 
-  // Float mapping instead of integer map() for better precision
   float depth = (float)raw * 30.0 / 4095.0;
   if (depth < 0.0)  depth = 0.0;
   if (depth > 50.0) return -1.0;
@@ -628,7 +584,6 @@ void calibrateBaseline() {
     radarServo.write(tempAngle);
     delay(80);
 
-    // Use median for more reliable baseline
     float d = readUltrasonicMedian();
     baseline[i] = (d > 0) ? d : 50.0;
 
@@ -641,20 +596,14 @@ void calibrateBaseline() {
 
 bool isObstructed(int angle, float dist) {
   if (!baselineReady || dist < 0) return false;
-  // Skip boundary angles where servo jitter causes unreliable readings
   if (angle <= SWEEP_MIN + SWEEP_MARGIN || angle >= SWEEP_MAX - SWEEP_MARGIN) return false;
-  // Reading beyond detection range — can't reliably determine obstruction
   if (dist > MAX_DETECTION_RANGE_CM) return false;
   int idx = (angle - SWEEP_MIN) / SWEEP_STEP;
   if (idx < 0 || idx >= BASELINE_STEPS) return false;
-  // Skip angles where baseline was far (>2x max range) — unreliable comparison
   if (baseline[idx] > MAX_DETECTION_RANGE_CM * 2.0) return false;
   return ((baseline[idx] - dist) >= OBSTRUCT_THRESH);
 }
 
-// Push the DELTA from baseline (not raw distance) to the variance buffer.
-// This prevents different angles seeing different wall distances from
-// inflating variance. Only actual changes from baseline cause variance.
 void pushReading(float d, int angle) {
   if (d < 0 || d > MAX_DETECTION_RANGE_CM) return;
   if (!baselineReady) return;
@@ -663,7 +612,6 @@ void pushReading(float d, int angle) {
   if (idx < 0 || idx >= BASELINE_STEPS) return;
 
   float delta = fabs(baseline[idx] - d);
-  // Cap delta to prevent extreme values from unreliable baselines
   if (delta > MAX_DETECTION_RANGE_CM) delta = MAX_DETECTION_RANGE_CM;
   buf[bIdx % BUF_SIZE] = delta;
   bIdx++;
@@ -680,8 +628,6 @@ float calcVariance() {
   return v / BUF_SIZE;
 }
 
-// Mean delta: catches STATIONARY objects that differ from baseline
-// (variance = 0 for consistent deltas, but mean delta is high)
 float calcMeanDelta() {
   if (!bufFull && bIdx < BUF_SIZE) return 0.0;
   float sum = 0.0;
@@ -689,10 +635,8 @@ float calcMeanDelta() {
   return sum / BUF_SIZE;
 }
 
-// Track per-angle delta history for clog detection
 void updateAngleHistory(int angle, float dist) {
   if (!baselineReady || dist < 0 || dist > MAX_DETECTION_RANGE_CM) return;
-  // Skip boundary angles where servo jitter causes unreliable readings
   if (angle <= SWEEP_MIN + SWEEP_MARGIN || angle >= SWEEP_MAX - SWEEP_MARGIN) return;
   int idx = (angle - SWEEP_MIN) / SWEEP_STEP;
   if (idx < 0 || idx >= BASELINE_STEPS) return;
@@ -702,7 +646,6 @@ void updateAngleHistory(int angle, float dist) {
   if (angleHistCount[idx] < HISTORY_DEPTH * 100) angleHistCount[idx]++;
 }
 
-// Evaluate clog status at each sweep boundary
 void checkClogStatus() {
   int consecutive = 0;
   int maxConsecutive = 0;
@@ -712,7 +655,6 @@ void checkClogStatus() {
       consecutive = 0;
       continue;
     }
-    // Calculate mean and temporal variance of recent deltas at this angle
     float mean = 0.0;
     for (int j = 0; j < HISTORY_DEPTH; j++) mean += angleHistory[i][j];
     mean /= HISTORY_DEPTH;
@@ -721,7 +663,6 @@ void checkClogStatus() {
     for (int j = 0; j < HISTORY_DEPTH; j++) var += pow(angleHistory[i][j] - mean, 2);
     var /= HISTORY_DEPTH;
 
-    // Static = consistently high delta with low variance (object not moving)
     if (var < STATIC_VAR_THRESH && mean > STATIC_DELTA_THRESH) {
       consecutive++;
       if (consecutive > maxConsecutive) maxConsecutive = consecutive;
@@ -755,16 +696,15 @@ void updateDebounce(Status raw) {
 
   int needed;
   if ((int)raw > (int)confirmedStatus) {
-    // Instant escalation to Critical if already alerting (Waste/Elevated)
     if (raw == CRITICAL && confirmedStatus != NORMAL) {
       needed = 1;
     } else {
-      needed = DEBOUNCE_ESCALATE;      // Quick to confirm higher severity
+      needed = DEBOUNCE_ESCALATE;
     }
   } else if ((int)raw < (int)confirmedStatus) {
-    needed = DEBOUNCE_DEESCALATE;    // Slow to drop severity
+    needed = DEBOUNCE_DEESCALATE;
   } else {
-    needed = DEBOUNCE_ESCALATE;      // Same level
+    needed = DEBOUNCE_ESCALATE;
   }
 
   if (candidateCount >= needed) {
@@ -772,8 +712,6 @@ void updateDebounce(Status raw) {
     confirmedStatus = candidateStatus;
     candidateCount  = needed;
 
-    // On any transition to NORMAL: flush all detection data for clean slate
-    // Prevents stale history from causing false re-triggers
     if (confirmedStatus == NORMAL && prev != NORMAL) {
       for (int i = 0; i < BUF_SIZE; i++) buf[i] = 0.0;
       bIdx = 0;
@@ -790,11 +728,9 @@ void setOutput(Status s) {
   unsigned long now = millis();
   bool blinkState = (now / 500) % 2 == 0;
 
-  // ── LEDs ──
   digitalWrite(LED_GREEN, (s == NORMAL) ? HIGH : LOW);
 
   if (s == WASTE && isClogged) {
-    // Clogged: fast yellow blink + slow red blink
     bool fastBlink = (now / 200) % 2 == 0;
     digitalWrite(LED_YELLOW, fastBlink ? HIGH : LOW);
     digitalWrite(LED_RED, blinkState ? HIGH : LOW);
@@ -806,12 +742,10 @@ void setOutput(Status s) {
     digitalWrite(LED_RED, (s == CRITICAL) ? HIGH : LOW);
   }
 
-  // ── Buzzer (passive — distinct patterns per status) ──
   if (s == NORMAL) {
     ledcWriteTone(BUZZER_PIN, 0);
     ledcWrite(BUZZER_PIN, 0);
   } else if (s == ELEVATED) {
-    // Short chirp every 3 seconds
     unsigned long cycle = now % 3000;
     if (cycle < 100) {
       ledcWriteTone(BUZZER_PIN, 2500);
@@ -820,7 +754,6 @@ void setOutput(Status s) {
       ledcWrite(BUZZER_PIN, 0);
     }
   } else if (s == WASTE && !isClogged) {
-    // Double chirp every 2 seconds
     unsigned long cycle = now % 2000;
     if (cycle < 100 || (cycle > 200 && cycle < 300)) {
       ledcWriteTone(BUZZER_PIN, 3000);
@@ -829,7 +762,6 @@ void setOutput(Status s) {
       ledcWrite(BUZZER_PIN, 0);
     }
   } else if (s == WASTE && isClogged) {
-    // Rising warble every 1.5 seconds
     unsigned long cycle = now % 1500;
     if (cycle < 400) {
       int freq = 2000 + (int)((cycle / 400.0) * 1500.0);
@@ -839,7 +771,6 @@ void setOutput(Status s) {
       ledcWrite(BUZZER_PIN, 0);
     }
   } else if (s == CRITICAL) {
-    // Fast alternating siren (4500/3000 Hz at 120ms)
     bool phase = (now / 120) % 2 == 0;
     ledcWriteTone(BUZZER_PIN, phase ? 4500 : 3000);
   }
@@ -854,10 +785,6 @@ const char* statusLabel(Status s) {
     default:       return "Unknown";
   }
 }
-
-// ═══════════════════════════════════════════════════════════════
-// WEBSERVER CONTROL
-// ═══════════════════════════════════════════════════════════════
 
 void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
                AwsEventType type, void* arg, uint8_t* data, size_t len) {
@@ -887,10 +814,6 @@ void pushLiveData() {
   ws.textAll(payload);
 }
 
-// ═══════════════════════════════════════════════════════════════
-// MAIN ARDUINO HOOKS
-// ═══════════════════════════════════════════════════════════════
-
 void setup() {
   Serial.begin(115200);
 
@@ -899,7 +822,6 @@ void setup() {
   Serial.print("IP: ");
   Serial.println(WiFi.softAPIP());
 
-  // Captive Portal: redirect all DNS queries to our IP
   dnsServer.start(53, "*", WiFi.softAPIP());
   Serial.println("DNS server started (captive portal).");
 
@@ -909,7 +831,6 @@ void setup() {
     request->send_P(200, "text/html", INDEX_HTML);
   });
 
-  // Captive portal detection endpoints (Android / iOS / Windows)
   server.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest* request) {
     request->redirect("http://192.168.4.1/");
   });
@@ -923,7 +844,6 @@ void setup() {
     request->redirect("http://192.168.4.1/");
   });
 
-  // Catch-all: redirect any unknown URL to dashboard
   server.onNotFound([](AsyncWebServerRequest* request) {
     request->redirect("http://192.168.4.1/");
   });
@@ -951,7 +871,7 @@ void setup() {
 
   ledcAttach(BUZZER_PIN, 2000, 8);
 
-  for (int i = 0; i < BUF_SIZE; i++) buf[i] = 0.0;  // Zero delta = calm baseline
+  for (int i = 0; i < BUF_SIZE; i++) buf[i] = 0.0;
   memset(angleHistory, 0, sizeof(angleHistory));
   memset(angleHistCount, 0, sizeof(angleHistCount));
   setOutput(NORMAL);
@@ -972,24 +892,19 @@ void loop() {
   stepServo();
   currentDist = readUltrasonicMedian();
 
-  // Detect sweep boundary (direction changed) — run clog analysis
   if (sweepDir != prevSweepDir) {
     checkClogStatus();
   }
 
-  // Push delta-from-baseline for in-range readings; push zero for out-of-range
   if (currentDist > 0 && currentDist <= MAX_DETECTION_RANGE_CM) {
     pushReading(currentDist, sweepAngle);
     updateAngleHistory(sweepAngle, currentDist);
   } else if (!obstructionDetected) {
-    // No object in range and no active obstruction — push zero delta
-    // to naturally flush old detections from the buffer
     buf[bIdx % BUF_SIZE] = 0.0;
     bIdx++;
     if (bIdx >= BUF_SIZE) bufFull = true;
   }
 
-  // Obstruction with hold timer — persists across a full sweep cycle
   if (isObstructed(sweepAngle, currentDist)) {
     obstructionTimer = OBSTRUCTION_HOLD;
   }
@@ -1000,14 +915,11 @@ void loop() {
     obstructionDetected = false;
   }
 
-
-  // Read water level frequently (~1s) or every step if already alerting
   int currentInterval = (confirmedStatus != NORMAL) ? 1 : WL_READ_INTERVAL;
   if (++stepCount >= currentInterval) {
-    // Silence buzzer during ADC read to prevent PWM noise coupling
     ledcWriteTone(BUZZER_PIN, 0);
     ledcWrite(BUZZER_PIN, 0);
-    delayMicroseconds(200);  // Let noise settle
+    delayMicroseconds(200);
     float rawDepth = readWaterLevel();
     if (rawDepth >= 0.0) {
       waterDepth = WL_EMA_ALPHA * rawDepth + (1.0 - WL_EMA_ALPHA) * waterDepth;
@@ -1015,7 +927,6 @@ void loop() {
     stepCount = 0;
   }
 
-  // Classify and output
   float  variance  = calcVariance();
   float  meanDelta = calcMeanDelta();
   Status raw       = classify(waterDepth, variance, meanDelta, obstructionDetected);
