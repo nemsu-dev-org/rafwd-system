@@ -2,7 +2,7 @@
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
-#include <ESP32Servo.h>
+
 #include <DNSServer.h>
 
 const char* AP_SSID     = "CanalMonitor";
@@ -24,7 +24,7 @@ const int SWEEP_MIN  = 25;
 const int SWEEP_MAX  = 155;
 const int SWEEP_STEP = 1;
 const int SWEEP_MARGIN = 3;
-const unsigned long STEP_INTERVAL_MS = 100;
+const unsigned long STEP_INTERVAL_MS = 50;
 
 const float OBSTRUCT_THRESH  = 2.0;
 const float DEPTH_ELEVATED   = 10.0;
@@ -52,11 +52,11 @@ int       bIdx    = 0;
 bool      bufFull = false;
 
 const int DEBOUNCE_ESCALATE   = 2;
-const int DEBOUNCE_DEESCALATE = 2;
+const int DEBOUNCE_DEESCALATE = 3;
 
 enum Status { NORMAL, ELEVATED, WASTE, CRITICAL };
 
-Servo  radarServo;
+
 int    sweepAngle          = SWEEP_MIN;
 int    sweepDir            = 1;
 int    stepCount           = 0;
@@ -160,7 +160,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 </div>
 
 <script>
-var MD=20,SM=25,SX=155,SS=SX-SM+1,MSA=400;
+var MD=20,SM=25,SX=155,SS=SX-SM+1,MSA=200;
 var rc=document.getElementById('radar'),cx=rc.getContext('2d');
 var dpr=window.devicePixelRatio||1;
 var CX,CY,R;
@@ -280,7 +280,7 @@ function drawRadar(){
     cx.lineWidth=1.5;cx.stroke();
   }
 
-  sw+=(sys.angle-sw)*0.3;
+  sw+=(sys.angle-sw)*0.45;
   var mr=toRad(sw),mx=CX+Math.cos(mr)*R,my=CY-Math.sin(mr)*R;
   cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(mx,my);cx.strokeStyle='rgba(0,250,120,0.1)';cx.lineWidth=8;cx.stroke();
   cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(mx,my);cx.strokeStyle='rgba(0,250,120,0.2)';cx.lineWidth=5;cx.stroke();
@@ -457,7 +457,7 @@ float readUltrasonic() {
   digitalWrite(TRIG_PIN, HIGH);
   delayMicroseconds(10);
   digitalWrite(TRIG_PIN, LOW);
-  long duration = pulseIn(ECHO_PIN, HIGH, 15000);
+  long duration = pulseIn(ECHO_PIN, HIGH, 6000);
   if (duration == 0) return -1.0;
   float distance = (duration * 0.0343) / 2.0;
   if (distance < 2.0) return 1.0;
@@ -467,7 +467,7 @@ float readUltrasonic() {
 
 float readUltrasonicMedian() {
   float r[3];
-  for (int i = 0; i < 3; i++) { r[i] = readUltrasonic(); if (i < 2) delay(8); }
+  for (int i = 0; i < 3; i++) { r[i] = readUltrasonic(); if (i < 2) delay(4); }
   for (int i = 0; i < 2; i++)
     for (int j = i + 1; j < 3; j++)
       if (r[j] < r[i]) { float tmp = r[i]; r[i] = r[j]; r[j] = tmp; }
@@ -490,11 +490,37 @@ float readWaterLevel() {
   return depth;
 }
 
+void writeServo(int angle) {
+  uint32_t duty = map(angle, 0, 180, 1638, 7864);
+  ledcWrite(SERVO_PIN, duty);
+}
+
+int currentBuzzerFreq = -1;
+bool buzzerIsOn = false;
+
+void buzzerTone(int freq) {
+  if (freq != currentBuzzerFreq) {
+    ledcChangeFrequency(BUZZER_PIN, freq, 8);
+    currentBuzzerFreq = freq;
+  }
+  if (!buzzerIsOn) {
+    ledcWrite(BUZZER_PIN, 128); // 50% duty cycle
+    buzzerIsOn = true;
+  }
+}
+
+void buzzerOff() {
+  if (buzzerIsOn) {
+    ledcWrite(BUZZER_PIN, 0);
+    buzzerIsOn = false;
+  }
+}
+
 void stepServo() {
   sweepAngle += sweepDir * SWEEP_STEP;
   if (sweepAngle >= SWEEP_MAX) { sweepAngle = SWEEP_MAX; sweepDir = -1; }
   else if (sweepAngle <= SWEEP_MIN) { sweepAngle = SWEEP_MIN; sweepDir = 1; }
-  radarServo.write(sweepAngle);
+  writeServo(sweepAngle);
 }
 
 void calibrateBaseline() {
@@ -502,7 +528,7 @@ void calibrateBaseline() {
   delay(1000);
   int tempAngle = SWEEP_MIN;
   for (int i = 0; i < BASELINE_STEPS; i++) {
-    radarServo.write(tempAngle);
+    writeServo(tempAngle);
     delay(80);
     float d = readUltrasonicMedian();
     baseline[i] = (d > 0) ? d : 50.0;
@@ -634,22 +660,22 @@ void setOutput(Status s) {
     digitalWrite(LED_RED, (s == CRITICAL) ? HIGH : LOW);
   }
   if (s == NORMAL) {
-    ledcWriteTone(BUZZER_PIN, 0); ledcWrite(BUZZER_PIN, 0);
+    buzzerOff();
   } else if (s == ELEVATED) {
     unsigned long cycle = now % 3000;
-    if (cycle < 100) ledcWriteTone(BUZZER_PIN, 2500);
-    else { ledcWriteTone(BUZZER_PIN, 0); ledcWrite(BUZZER_PIN, 0); }
+    if (cycle < 200) buzzerTone(3000);
+    else buzzerOff();
   } else if (s == WASTE && !isClogged) {
     unsigned long cycle = now % 2000;
-    if (cycle < 100 || (cycle > 200 && cycle < 300)) ledcWriteTone(BUZZER_PIN, 3000);
-    else { ledcWriteTone(BUZZER_PIN, 0); ledcWrite(BUZZER_PIN, 0); }
+    if (cycle < 200 || (cycle > 350 && cycle < 550)) buzzerTone(3000);
+    else buzzerOff();
   } else if (s == WASTE && isClogged) {
     unsigned long cycle = now % 1500;
-    if (cycle < 400) { int freq = 2000 + (int)((cycle / 400.0) * 1500.0); ledcWriteTone(BUZZER_PIN, freq); }
-    else { ledcWriteTone(BUZZER_PIN, 0); ledcWrite(BUZZER_PIN, 0); }
+    if (cycle < 500) { int freq = 2500 + (int)((cycle / 500.0) * 1000.0); buzzerTone(freq); }
+    else buzzerOff();
   } else if (s == CRITICAL) {
-    bool phase = (now / 120) % 2 == 0;
-    ledcWriteTone(BUZZER_PIN, phase ? 4500 : 3000);
+    bool phase = (now / 150) % 2 == 0;
+    buzzerTone(phase ? 4000 : 3000);
   }
 }
 
@@ -703,10 +729,9 @@ void setup() {
   server.onNotFound([](AsyncWebServerRequest* request) { request->redirect("http://192.168.4.1/"); });
   server.begin();
   Serial.println("Web server ready (captive portal active).");
-  for (int i = 0; i < 4; i++) ESP32PWM::allocateTimer(i);
-  radarServo.setPeriodHertz(50);
-  radarServo.attach(SERVO_PIN, 500, 2400);
-  radarServo.write(SWEEP_MIN);
+  ledcAttachChannel(SERVO_PIN, 50, 16, 0);
+  writeServo(SWEEP_MIN);
+  ledcAttachChannel(BUZZER_PIN, 3000, 8, 4);
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
   pinMode(WL_VCC_PIN, OUTPUT);
@@ -714,7 +739,6 @@ void setup() {
   pinMode(LED_GREEN, OUTPUT);
   pinMode(LED_YELLOW, OUTPUT);
   pinMode(LED_RED, OUTPUT);
-  ledcAttach(BUZZER_PIN, 2000, 8);
   for (int i = 0; i < BUF_SIZE; i++) buf[i] = 0.0;
   memset(angleHistory, 0, sizeof(angleHistory));
   memset(angleHistCount, 0, sizeof(angleHistCount));
@@ -748,7 +772,7 @@ void loop() {
 
   int currentInterval = (confirmedStatus != NORMAL) ? 1 : WL_READ_INTERVAL;
   if (++stepCount >= currentInterval) {
-    ledcWriteTone(BUZZER_PIN, 0); ledcWrite(BUZZER_PIN, 0);
+    buzzerOff();
     delayMicroseconds(200);
     float rawDepth = readWaterLevel();
     if (rawDepth >= 0.0) waterDepth = WL_EMA_ALPHA * rawDepth + (1.0 - WL_EMA_ALPHA) * waterDepth;
