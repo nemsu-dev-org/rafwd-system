@@ -1,5 +1,9 @@
 # Canal Flood & Waste Detection System - Wiring Guide
 
+<p align="center">
+  <img width="1192" height="386" alt="wiring1" src="https://github.com/user-attachments/assets/cd65332c-2096-4fd3-849b-55f82ffb8267" />
+</p>
+
 **Board:** ESP32 DevKitV1 (ESP32-WROOM-32)  
 **Power Supply:** Micro USB Phone Charger (5V / 2A, 10W) → AC Outlet (220–240V) → ESP32 Micro-USB port
 
