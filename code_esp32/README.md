@@ -1,4 +1,4 @@
-# Canal Flood & Waste Detection System — Wiring Guide
+# Canal Flood & Waste Detection System - Wiring Guide
 
 **Board:** ESP32 DevKitV1 (ESP32-WROOM-32)  
 **Power Supply:** Micro USB Phone Charger (5V / 2A, 10W) → AC Outlet (220–240V) → ESP32 Micro-USB port
@@ -219,19 +219,3 @@ GND    (−)        →  GND
 
 ## GND Rail
 All component GND wires connect to the same **ground rail** on your breadboard. Run one jumper wire from any ESP32 GND pin to the breadboard's negative (−) rail, then connect all component grounds to that rail. All ESP32 GND pins are internally connected, so any one will work.
-
----
-
-## Quick Checklist Before Power On
-
-- [ ] Charger is rated **5V / 2A** (check the label on the adapter)
-- [ ] ESP32 **VIN** pin is connected to the breadboard positive (+) rail
-- [ ] ESP32 **GND** pin is connected to the breadboard negative (−) rail
-- [ ] Servo VCC (Red) → **Breadboard (+) rail**, not 3.3V
-- [ ] HC-SR04 VCC → **Breadboard (+) rail**, not 3.3V
-- [ ] HW-038 Signal → **D34** (ADC1 pin, Wi-Fi safe)
-- [ ] All 3 LEDs have a **220Ω resistor** on the cathode side
-- [ ] Buzzer is **passive** (not active)
-- [ ] All GND wires go to the **same ground rail** on the breadboard
-- [ ] No bare wires touching each other, no shorts on the breadboard
-- [ ] Plug charger into wall outlet **last**, after all wiring is verified
