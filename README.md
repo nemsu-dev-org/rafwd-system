@@ -1,5 +1,9 @@
 <div align="center">
 
+<p align="center">
+  <img width="1186" height="386" alt="hero" src="https://github.com/user-attachments/assets/38582a61-27ab-4a89-a11c-f1b4ab30b355" />
+</p>
+
 # Radar-Assisted Flood and Floating Waste Detection System
 
 [![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](#)
@@ -120,4 +124,4 @@ rafwd-system/
 
 See the LICENSE file for details.
 
-Copyright (c) 2026 Canal Monitor Team
+Copyright (c) 2026 Research Group 3 Team
