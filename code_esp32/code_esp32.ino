@@ -13,11 +13,12 @@ const int LED_GREEN    = 25;
 const int LED_YELLOW   = 26;
 const int LED_RED      = 27;
 const int BUZZER_PIN   = 32;
-const float SENSOR_MAX_RANGE_CM  = 5.0;
-const float WATER_SAFETY_MARGIN  = 0.3;
-const float MIN_EFFECTIVE_RANGE  = 2.0;
-const int SWEEP_MIN    = 35;
-const int SWEEP_MAX    = 145;
+const float SENSOR_HEIGHT_CM       = 9.0;
+const float CONTAINER_HALF_WIDTH   = 8.5;
+const float WATER_SAFETY_MARGIN    = 1.2;
+const float MIN_EFFECTIVE_RANGE    = 2.5;
+const int SWEEP_MIN    = 47;
+const int SWEEP_MAX    = 133;
 const int SWEEP_STEP   = 1;
 const int SWEEP_MARGIN = 3;
 const unsigned long STEP_INTERVAL_MS = 20;
@@ -70,7 +71,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <body><h1>CANAL FLOOD AND WASTE RADAR</h1><div id="header"><span id="cd"></span><span id="cl">Connecting...</span><button id="ab" onclick="toggleAudio()">ENABLE ALERTS</button></div><div id="banner"><div class="bt">For uninterrupted monitoring, open your full browser and visit <b>http://192.168.4.1</b></div><button class="bx" onclick="this.parentElement.classList.add('hidden')">&times;</button></div>
 <div id="main"><canvas id="radar"></canvas><div id="panel"><div class="ptitle">SYSTEM STATUS</div><div class="sbox" id="sb"><div class="slbl">CONFIRMED STATUS</div><div class="sval" id="sv">---</div></div><div id="metrics"><div class="metric-card"><div class="m-lbl">ANGLE</div><div class="m-val" id="ra">---</div></div><div class="metric-card"><div class="m-lbl">DISTANCE</div><div class="m-val" id="rd">---</div></div><div class="metric-card"><div class="m-lbl">DEPTH</div><div class="m-val" id="rp">---</div></div><div class="metric-card"><div class="m-lbl">VARIANCE</div><div class="m-val" id="rr">---</div></div></div><div class="wbox" id="wb"><div class="slbl">WASTE DETECTION</div><div class="sval" id="wv" style="color:#6A8FAA">CLEAR</div></div><div id="log"></div><button id="dlb" onclick="dlCSV()">&#11123; DOWNLOAD CSV</button></div></div>
 <div id="graphs"><div class="gb"><div class="gt">WATER DEPTH HISTORY (cm)</div><canvas id="dg" class="ch" width="400" height="80"></canvas></div><div class="gb"><div class="gt">VARIANCE HISTORY</div><canvas id="vg" class="ch" width="400" height="80"></canvas></div></div>
-<script>var MD=5.0,SM=35,SX=145,SS=SX-SM+1,MSA=200;var rc=document.getElementById('radar'),cx=rc.getContext('2d');var dpr=window.devicePixelRatio||1;var CX,CY,R;
+<script>var MD=9.0,SM=47,SX=133,SS=SX-SM+1,MSA=200;var rc=document.getElementById('radar'),cx=rc.getContext('2d');var dpr=window.devicePixelRatio||1;var CX,CY,R;
 function initRadar(){var w=rc.clientWidth,h=rc.clientHeight;if(w<100)w=800; if(h<60)h=460;rc.width=Math.round(w*dpr);rc.height=Math.round(h*dpr);cx.setTransform(dpr,0,0,dpr,0,0);CX=w/2;CY=h-30;R=Math.min(CX-20,CY-20);}initRadar();var sw=SM;var sDist=new Float32Array(SS).fill(-1);var sAge=new Float32Array(SS).fill(9999);var sObs=new Uint8Array(SS).fill(0);var sConf=new Array(SS).fill('Normal');var trail=[];var TMAX=30;var sys={angle:90,dist:-1,depth:0,variance:0,meanDelta:0,obstr:false,confirmed:'Normal',clogged:false,waste:false};var lastC='';var logE=document.getElementById('log');var HN=120,dH=new Float32Array(HN),vH=new Float32Array(HN),hI=0;
 function sCol(s){if(s==='Normal')return'#2ECC71';if(s==='Elevated')return'#F1C40F';if(s==='Waste Detected')return'#E67E22';if(s==='Waste Detected (Clogged)')return'#D35400';if(s==='Critical Flood Risk')return'#E74C3C';return'#6A8FAA';}
 function sRGB(s){if(s==='Normal')return[46,204,113];if(s==='Elevated')return[241,196,15];if(s==='Waste Detected')return[230,126,34];if(s==='Waste Detected (Clogged)')return[211,84,0];if(s==='Critical Flood Risk')return[231,76,60];return[106,143,170];}
@@ -102,7 +103,7 @@ float readUltrasonic() {
   long duration = pulseIn(ECHO_PIN, HIGH, 6000);
   if (duration == 0) return -1.0;
   float distance = (duration * 0.0343) / 2.0;
-  if (distance < 2.0) return -1.0;
+  if (distance < 1.0) return -1.0;
   if (distance > 400.0) return -1.0;
   return distance;}
 float readUltrasonicMedian() {
@@ -126,6 +127,11 @@ float readWaterLevel() {
   if (depth < WL_NOISE_FLOOR) depth = 0.0;
   if (depth > 4.0) depth = 4.0;
   return depth;}
+float calcAngleRange(int angle) {
+  float a = abs(angle - 90) * DEG_TO_RAD, cosA = cos(a), sinA = sin(a);
+  float beam = (sinA < 0.02f) ? SENSOR_HEIGHT_CM : min(SENSOR_HEIGHT_CM / cosA, CONTAINER_HALF_WIDTH / sinA);
+  if (waterDepth <= 0) return min(beam, SENSOR_HEIGHT_CM);
+  return max(MIN_EFFECTIVE_RANGE, min(beam, (SENSOR_HEIGHT_CM - waterDepth) / max(cosA, 0.1f) - WATER_SAFETY_MARGIN));}
 void writeServo(int angle) {
   uint32_t duty = map(angle, 0, 180, 1638, 7864);
   ledcWrite(SERVO_PIN, duty);}
@@ -162,7 +168,7 @@ bool isObstructed(int angle, float dist) {
   if (dist > effectiveRange) return false;
   int idx = (angle - SWEEP_MIN) / SWEEP_STEP;
   if (idx < 0 || idx >= BASELINE_STEPS) return false;
-  if (baseline[idx] > SENSOR_MAX_RANGE_CM * 2.0) return false;
+  if (baseline[idx] > SENSOR_HEIGHT_CM * 2.0) return false;
   return ((baseline[idx] - dist) >= OBSTRUCT_THRESH);}
 void pushReading(float d, int angle) {
   if (d < 0 || d > effectiveRange || !baselineReady) return;
@@ -267,8 +273,7 @@ void setOutput(Status s) {
     unsigned long cycle = now % 2000;
     if (cycle < 100 || (cycle >= 200 && cycle < 300) || (cycle >= 400 && cycle < 500)) buzzerOn(); else buzzerOff();
   } else if (s == CRITICAL) {
-    unsigned long cycle = now % 600;
-    if (cycle < 300) buzzerOn(); else buzzerOff();
+    buzzerOn();
   }}
 const char* statusLabel(Status s) {
   switch (s) {
@@ -285,7 +290,7 @@ void pushLiveData() {
   if (ws.count() == 0) return;
   ws.cleanupClients();
   JsonDocument doc;
-  doc["maxDist"]      = effectiveRange;
+  doc["maxDist"]      = SENSOR_HEIGHT_CM;
   doc["angle"]        = sweepAngle;
   doc["dist"]         = (currentDist > 0) ? currentDist : -1.0;
   doc["depth"]        = waterDepth;
@@ -341,6 +346,7 @@ void loop() {
   lastStepTime = now;
   int prevSweepDir = sweepDir;
   stepServo();
+  effectiveRange = calcAngleRange(sweepAngle);
   currentDist = readUltrasonicMedian();
   if (sweepDir != prevSweepDir) checkClogStatus();
   if (currentDist > 0 && currentDist <= effectiveRange) {
@@ -354,12 +360,8 @@ void loop() {
   else obstructionDetected = false;
   int currentInterval = (confirmedStatus != NORMAL) ? 1 : WL_READ_INTERVAL;
   if (++stepCount >= currentInterval) {
-    buzzerOff();
-    delayMicroseconds(200);
     float rawDepth = readWaterLevel();
     if (rawDepth >= 0.0) waterDepth = WL_EMA_ALPHA * rawDepth + (1.0 - WL_EMA_ALPHA) * waterDepth;
-    float newRange = SENSOR_MAX_RANGE_CM - waterDepth - WATER_SAFETY_MARGIN;
-    effectiveRange = max(MIN_EFFECTIVE_RANGE, newRange);
     stepCount = 0;}
   float  variance  = calcVariance();
   float  meanDelta = calcMeanDelta();
