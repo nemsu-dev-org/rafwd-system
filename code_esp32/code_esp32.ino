@@ -15,21 +15,20 @@ const int LED_RED      = 27;
 const int BUZZER_PIN   = 32;
 const float SENSOR_HEIGHT_CM       = 9.0;
 const float CONTAINER_HALF_WIDTH   = 8.5;
-const float WATER_SAFETY_MARGIN    = 1.2;
+const float WATER_SAFETY_MARGIN    = 0.3;
 const float MIN_EFFECTIVE_RANGE    = 2.5;
 const int SWEEP_MIN    = 47;
 const int SWEEP_MAX    = 133;
 const int SWEEP_STEP   = 1;
-const int SWEEP_MARGIN = 3;
-const unsigned long STEP_INTERVAL_MS = 20;
-const float OBSTRUCT_THRESH   = 2.0;
-const float DEPTH_ELEVATED    = 2.0;  
+const int SWEEP_MARGIN = 5;
+const unsigned long STEP_INTERVAL_MS = 35;
+const float OBSTRUCT_THRESH   = 1.2;
+const float DEPTH_ELEVATED    = 2.0;
 const float DEPTH_CRITICAL    = 4.0;
-const float WL_NOISE_FLOOR    = 0.3; 
-const float VARIANCE_THRESH   = 4.0;
-const float MEAN_DELTA_THRESH = 2.5;
+const float WL_NOISE_FLOOR    = 0.3;
+const float VARIANCE_THRESH   = 2.5;
+const float MEAN_DELTA_THRESH = 1.5;
 const int   OBSTRUCTION_HOLD  = 13;
-const int   WL_READ_INTERVAL  = 25;
 const int   HISTORY_DEPTH        = 2;
 const float STATIC_VAR_THRESH    = 2.0;
 const float STATIC_DELTA_THRESH  = 2.0;
@@ -43,13 +42,12 @@ const int BUF_SIZE = 12;
 float     buf[BUF_SIZE];
 int       bIdx    = 0;
 bool      bufFull = false;
-const int DEBOUNCE_ESCALATE   = 5;
-const int DEBOUNCE_DEESCALATE = 8;
+const int DEBOUNCE_ESCALATE   = 10;
+const int DEBOUNCE_DEESCALATE = 30;
 enum Status { NORMAL, ELEVATED, WASTE, CRITICAL };
 bool wasteActive = false;
 int    sweepAngle          = SWEEP_MIN;
 int    sweepDir            = 1;
-int    stepCount           = 0;
 float  waterDepth          = SIMULATED_WATER_DEPTH;
 float  effectiveRange      = SENSOR_HEIGHT_CM;
 float  currentDist         = -1.0;
@@ -123,9 +121,9 @@ float readWaterLevel() {
   int raw = analogRead(WL_DATA_PIN);
   digitalWrite(WL_VCC_PIN, LOW);
   if (raw <= 0) return -1.0;
-  float depth = (float)raw * 4.0 / 4095.0;
+  float depth = (float)raw * 5.5 / 4095.0;
   if (depth < WL_NOISE_FLOOR) depth = 0.0;
-  if (depth > 4.0) depth = 4.0;
+  if (depth > 5.0) depth = 5.0;
   return depth;}
 float calcAngleRange(int angle) {
   float a = abs(angle - 90) * DEG_TO_RAD, cosA = cos(a), sinA = sin(a);
@@ -169,9 +167,11 @@ bool isObstructed(int angle, float dist) {
   int idx = (angle - SWEEP_MIN) / SWEEP_STEP;
   if (idx < 0 || idx >= BASELINE_STEPS) return false;
   if (baseline[idx] > SENSOR_HEIGHT_CM * 2.0) return false;
+  if (waterDepth > 0 && dist >= (SENSOR_HEIGHT_CM - waterDepth) / max((float)cos(abs(angle - 90) * DEG_TO_RAD), 0.1f) - 0.5f) return false;
   return ((baseline[idx] - dist) >= OBSTRUCT_THRESH);}
 void pushReading(float d, int angle) {
   if (d < 0 || d > effectiveRange || !baselineReady) return;
+  if (angle <= SWEEP_MIN + SWEEP_MARGIN || angle >= SWEEP_MAX - SWEEP_MARGIN) return;
   int idx = (angle - SWEEP_MIN) / SWEEP_STEP;
   if (idx < 0 || idx >= BASELINE_STEPS) return;
   float delta = fabs(baseline[idx] - d);
@@ -243,37 +243,32 @@ void updateDebounce(Status raw) {
       wasteActive = false;}}}
 void setOutput(Status s) {
   unsigned long now = millis();
-  bool blinkState = (now / 500) % 2 == 0;
   digitalWrite(LED_GREEN, (s == NORMAL) ? HIGH : LOW);
   if (s == WASTE && isClogged) {
-    bool flicker = (now / 100) % 2 == 0;
-    digitalWrite(LED_YELLOW, flicker ? HIGH : LOW);
+    unsigned long cycle = now % 2000;
+    bool on = (cycle < 100 || (cycle >= 200 && cycle < 300) || (cycle >= 400 && cycle < 500));
+    digitalWrite(LED_YELLOW, on ? HIGH : LOW);
     digitalWrite(LED_RED, LOW);
+    if (on) buzzerOn(); else buzzerOff();
   } else if (s == WASTE) {
-    digitalWrite(LED_YELLOW, blinkState ? HIGH : LOW);
+    unsigned long cycle = now % 2000;
+    bool on = (cycle < 150 || (cycle >= 300 && cycle < 450));
+    digitalWrite(LED_YELLOW, on ? HIGH : LOW);
     digitalWrite(LED_RED, LOW);
+    if (on) buzzerOn(); else buzzerOff();
   } else if (s == ELEVATED) {
     digitalWrite(LED_YELLOW, HIGH);
     digitalWrite(LED_RED, LOW);
+    unsigned long cycle = now % 4000;
+    if (cycle < 120) buzzerOn(); else buzzerOff();
   } else if (s == CRITICAL) {
     digitalWrite(LED_YELLOW, LOW);
     digitalWrite(LED_RED, HIGH);
+    buzzerOn();
   } else {
     digitalWrite(LED_YELLOW, LOW);
     digitalWrite(LED_RED, LOW);
-  }
-  if (s == NORMAL) buzzerOff();
-  else if (s == ELEVATED) {
-    unsigned long cycle = now % 4000;
-    if (cycle < 120) buzzerOn(); else buzzerOff();
-  } else if (s == WASTE && !isClogged) {
-    unsigned long cycle = now % 2000;
-    if (cycle < 150 || (cycle >= 300 && cycle < 450)) buzzerOn(); else buzzerOff();
-  } else if (s == WASTE && isClogged) {
-    unsigned long cycle = now % 2000;
-    if (cycle < 100 || (cycle >= 200 && cycle < 300) || (cycle >= 400 && cycle < 500)) buzzerOn(); else buzzerOff();
-  } else if (s == CRITICAL) {
-    buzzerOn();
+    buzzerOff();
   }}
 const char* statusLabel(Status s) {
   switch (s) {
@@ -292,7 +287,7 @@ void pushLiveData() {
   JsonDocument doc;
   doc["maxDist"]      = SENSOR_HEIGHT_CM;
   doc["angle"]        = sweepAngle;
-  doc["dist"]         = (currentDist > 0) ? currentDist : -1.0;
+  doc["dist"]         = (currentDist > 0 && currentDist <= effectiveRange) ? currentDist : -1.0;
   doc["depth"]        = waterDepth;
   doc["variance"]     = calcVariance();
   doc["meanDelta"]    = calcMeanDelta();
@@ -358,11 +353,8 @@ void loop() {
   if (isObstructed(sweepAngle, currentDist)) obstructionTimer = OBSTRUCTION_HOLD;
   if (obstructionTimer > 0) { obstructionTimer--; obstructionDetected = true; }
   else obstructionDetected = false;
-  int currentInterval = (confirmedStatus != NORMAL) ? 1 : WL_READ_INTERVAL;
-  if (++stepCount >= currentInterval) {
-    float rawDepth = readWaterLevel();
-    if (rawDepth >= 0.0) waterDepth = WL_EMA_ALPHA * rawDepth + (1.0 - WL_EMA_ALPHA) * waterDepth;
-    stepCount = 0;}
+  float rawDepth = readWaterLevel();
+  if (rawDepth >= 0.0) waterDepth = WL_EMA_ALPHA * rawDepth + (1.0 - WL_EMA_ALPHA) * waterDepth;
   float  variance  = calcVariance();
   float  meanDelta = calcMeanDelta();
   Status raw       = classify(waterDepth, variance, meanDelta, obstructionDetected);
