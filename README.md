@@ -33,7 +33,7 @@
 * **Real-time Monitoring:** Continuous scanning using an SG90 servo and HC-SR04 ultrasonic sensor to detect water depth and surface obstructions.
 * **Responsive Web Dashboard:** Live radar visualizer, historical data graphs, and system metrics accessible from any browser on the same network.
 * **Asynchronous Processing:** Built on ESPAsyncWebServer for non-blocking WebSocket communication and client updates.
-* **Automated Alerts:** Integrated passive buzzer and LED status indicators for on-site elevated and critical risk warnings.
+* **Automated Alerts:** Integrated active buzzer and LED status indicators for on-site elevated and critical risk warnings.
 
 ---
 

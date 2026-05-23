@@ -68,7 +68,7 @@ Instead of a static range limit, the system dynamically calculates the detection
 | Constant | Value | Notes |
 |---|---|---|
 | `SENSOR_HEIGHT_CM` | `9.0 cm` | Physical sensor mounting height above container floor. Used as the baseline validation ceiling. |
-| `WATER_SAFETY_MARGIN` | `1.0 cm` | Buffer zone kept above the water surface to filter out waves and ripples. |
+| `WATER_SAFETY_MARGIN` | `0.5 cm` | Buffer zone kept above the water surface to filter out waves and ripples. Reduced for controlled demo environments. |
 | `MIN_EFFECTIVE_RANGE` | `2.5 cm` | Minimum allowed range ceiling to ensure proximity scanning remains active. |
 
 The dynamic effective range is computed per-angle using beam geometry:
@@ -85,7 +85,7 @@ The `DISTANCE` label in the web interface shows the **live measured distance** f
 
 | Constant | Value | Web Label | Notes |
 |---|---|---|---|
-| `DEPTH_ELEVATED` | `2.0 cm` | `DEPTH` | Water depth at which the system escalates to **Elevated** status. |
+| `DEPTH_ELEVATED` | `3.0 cm` | `DEPTH` | Water depth at which the system escalates to **Elevated** status. |
 | `DEPTH_CRITICAL` | `4.0 cm` | `DEPTH` | Water depth at which the system escalates to **Critical Flood Risk**. |
 | `WL_EMA_ALPHA` | `0.8` | - | Exponential Moving Average smoothing factor for depth readings. Higher = more responsive, lower = smoother. |
 
@@ -99,9 +99,9 @@ The buzzer **must be an active type** (has a built-in oscillator). The firmware 
 
 | Status | Pattern | Cycle and Durations |
 |---|---|---|
-| **Elevated** | Single short beep every 4 seconds | 120 ms ON, then silent for 3880 ms |
-| **Waste Detected** | Double beep every 2 seconds | 150 ms ON -> 150 ms OFF -> 150 ms ON -> 1550 ms OFF |
-| **Waste Detected (Clogged)** | Triple rapid beep every 2 seconds | 100 ms ON -> 100 ms OFF -> 100 ms ON -> 100 ms OFF -> 100 ms ON -> 1500 ms OFF |
+| **Elevated** | Silent | No audio alert |
+| **Waste Detected** | Periodic beep every 1 second | 300 ms ON, 700 ms OFF (synchronized with Yellow LED) |
+| **Waste Detected (Clogged)** | Rapid beep every 600 ms | 150 ms ON, 450 ms OFF (synchronized with Red LED) |
 | **Critical Flood Risk** | Continuous solid tone | Permanently ON |
 
 These patterns are handled inside the `setOutput()` function.
@@ -176,10 +176,10 @@ Red LED:
 ```
 
 *   **Normal**: Solid Green LED ON
-*   **Elevated**: Solid Yellow LED ON
-*   **Waste Detected**: Blinking Yellow LED ON (500ms intervals), Red LED OFF
-*   **Waste Detected (Clogged)**: Yellow LED rapidly flickering (100ms intervals), Red LED OFF
-*   **Critical**: Solid Red LED ON
+*   **Elevated**: Solid Yellow LED ON, Buzzer OFF
+*   **Waste Detected**: Blinking Yellow LED ON (300ms ON / 700ms OFF), Buzzer synchronized
+*   **Waste Detected (Clogged)**: Blinking Red LED ON (150ms ON / 450ms OFF), Buzzer synchronized
+*   **Critical**: Solid Red LED ON, Constant Buzzer
 
 ---
 
