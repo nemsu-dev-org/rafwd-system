@@ -5,63 +5,66 @@
 #include <ArduinoJson.h>
 #include <DNSServer.h>
 const char* AP_SSID = "CanalMonitor";
-const int SERVO_PIN    = 13;
-const int TRIG_PIN     = 14;
-const int ECHO_PIN     = 12;
-const int WL_VCC_PIN   = 33;
-const int WL_DATA_PIN  = 34;
-const int LED_GREEN    = 25;
-const int LED_YELLOW   = 26;
-const int LED_RED      = 27;
-const int BUZZER_PIN   = 32;
-const float SENSOR_HEIGHT_CM       = 9.0;
-const float CONTAINER_HALF_WIDTH   = 8.5;
-const float WATER_SAFETY_MARGIN    = 1.0;
-const float MIN_EFFECTIVE_RANGE    = 2.5;
-const int SWEEP_MIN    = 47;
-const int SWEEP_MAX    = 133;
-const int SWEEP_STEP   = 1;
+const int SERVO_PIN = 13;
+const int TRIG_PIN = 14;
+const int ECHO_PIN = 12;
+const int WL_VCC_PIN = 33;
+const int WL_DATA_PIN = 34;
+const int LED_GREEN = 25;
+const int LED_YELLOW = 26;
+const int LED_RED = 27;
+const int BUZZER_PIN = 32;
+const float SENSOR_HEIGHT_CM = 9.0;
+const float CONTAINER_HALF_WIDTH = 8.5;
+const float WATER_SAFETY_MARGIN = 0.5;
+const float MIN_EFFECTIVE_RANGE = 2.5;
+const int SWEEP_MIN = 47;
+const int SWEEP_MAX = 133;
+const int SWEEP_STEP = 1;
 const int SWEEP_MARGIN = 5;
 const unsigned long STEP_INTERVAL_MS = 40;
-const float OBSTRUCT_THRESH   = 1.2;
-const float DEPTH_ELEVATED    = 2.0;
-const float DEPTH_CRITICAL    = 4.0;
-const float WL_NOISE_FLOOR    = 0.3;
-const float VARIANCE_THRESH   = 2.5;
+const float OBSTRUCT_THRESH = 1.2;
+const float DEPTH_ELEVATED = 3.0;
+const float DEPTH_CRITICAL = 4.0;
+const float WL_NOISE_FLOOR = 0.3;
+const float VARIANCE_THRESH = 2.5;
 const float MEAN_DELTA_THRESH = 1.5;
-const int   OBSTRUCTION_HOLD  = 13;
-const int   HISTORY_DEPTH        = 2;
-const float STATIC_VAR_THRESH    = 2.0;
-const float STATIC_DELTA_THRESH  = 2.0;
-const int   CLOG_ANGLE_COUNT     = 3;
+const int OBSTRUCTION_HOLD = 13;
+const int HISTORY_DEPTH = 2;
+const float STATIC_VAR_THRESH = 2.0;
+const float STATIC_DELTA_THRESH = 2.0;
+const int CLOG_ANGLE_COUNT = 3;
 const float SIMULATED_WATER_DEPTH = 0.0;
 const float WL_EMA_ALPHA = 0.8;
-const int   BASELINE_STEPS = (SWEEP_MAX - SWEEP_MIN) / SWEEP_STEP + 1;
-float       baseline[BASELINE_STEPS];
-bool        baselineReady = false;
+const float WL_RAW_TO_VOLTS = 5.5 / 4095.0;
+const float WL_BASE_OFFSET = 1.9;
+const float WL_SCALE_FACTOR = 10.0;
+const int BASELINE_STEPS = (SWEEP_MAX - SWEEP_MIN) / SWEEP_STEP + 1;
+float baseline[BASELINE_STEPS];
+bool baselineReady = false;
 const int BUF_SIZE = 12;
-float     buf[BUF_SIZE];
-int       bIdx    = 0;
-bool      bufFull = false;
-const int DEBOUNCE_ESCALATE   = 10;
-const int DEBOUNCE_DEESCALATE = 30;
+float buf[BUF_SIZE];
+int bIdx = 0;
+bool bufFull = false;
+const int DEBOUNCE_ESCALATE = 10;
+const int DEBOUNCE_DEESCALATE = 25;
 enum Status { NORMAL, ELEVATED, WASTE, CRITICAL };
 bool wasteActive = false;
-int  wlCounter   = 0;
-int    sweepAngle          = SWEEP_MIN;
-int    sweepDir            = 1;
-float  waterDepth          = SIMULATED_WATER_DEPTH;
-float  effectiveRange      = SENSOR_HEIGHT_CM;
-float  currentDist         = -1.0;
-bool   obstructionDetected = false;
-int    obstructionTimer    = 0;
-Status confirmedStatus     = NORMAL;
-Status candidateStatus     = NORMAL;
-int    candidateCount      = 0;
+int wlCounter = 0;
+int sweepAngle = SWEEP_MIN;
+int sweepDir = 1;
+float waterDepth = SIMULATED_WATER_DEPTH;
+float effectiveRange = SENSOR_HEIGHT_CM;
+float currentDist = -1.0;
+bool obstructionDetected = false;
+int obstructionTimer = 0;
+Status confirmedStatus = NORMAL;
+Status candidateStatus = NORMAL;
+int candidateCount = 0;
 unsigned long lastStepTime = 0;
 float angleHistory[BASELINE_STEPS][HISTORY_DEPTH];
-int   angleHistCount[BASELINE_STEPS];
-bool  isClogged           = false;
+int angleHistCount[BASELINE_STEPS];
+bool isClogged = false;
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 DNSServer dnsServer;
@@ -79,9 +82,9 @@ function aLog(m,h){var d=new Date();var t=('0'+d.getHours()).slice(-2)+':'+('0'+
 function toRad(a){ var s=((a-SM)/(SX-SM))*180; return(180-s)*Math.PI/180; }
 function toXY(a,d){ var r=toRad(a),f=Math.min(d/MD,1); return{x:CX+Math.cos(r)*R*f,y:CY-Math.sin(r)*R*f}; }
 function drawRadar(){var w=rc.width/dpr,h=rc.height/dpr;cx.clearRect(0,0,w,h);cx.fillStyle='#050E18';cx.beginPath();cx.arc(CX,CY,R,Math.PI,2*Math.PI);cx.fill();var rings=[.25,.5,.75,1];for(var i=0;i<4;i++){var rr=R*rings[i];cx.beginPath();cx.arc(CX,CY,rr,Math.PI,2*Math.PI);cx.strokeStyle='rgba(0,200,120,0.25)';cx.lineWidth=.5;cx.stroke();cx.fillStyle='rgba(0,255,120,0.6)';cx.font='11px Courier New';cx.textAlign='left';cx.fillText((MD*rings[i]).toFixed(1)+'cm',CX+4,CY-rr+14);}cx.textAlign='center';for(var d=SM;d<=SX;d+=Math.round((SX-SM)/4)){var p=toXY(d,MD);cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(p.x,p.y);cx.strokeStyle='rgba(0,200,120,0.25)';cx.lineWidth=.5;cx.stroke();var lp=toXY(d,MD*1.12);cx.fillStyle='rgba(0,255,120,0.7)';cx.font='11px Courier New';cx.fillText(d+'\u00b0',lp.x,lp.y);}cx.beginPath();cx.moveTo(CX-R-8,CY);cx.lineTo(CX+R+8,CY);cx.strokeStyle='rgba(0,200,120,0.4)';cx.lineWidth=1;cx.stroke();for(var i=0;i<SS;i++){if(sAge[i]>=MSA)continue;var alpha=(1-sAge[i]/MSA)*0.18;if(alpha<0.01)continue;var ang=SM+i,tp=toXY(ang,MD);cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(tp.x,tp.y);cx.strokeStyle='rgba(0,250,120,'+alpha.toFixed(3)+')';cx.lineWidth=1.5;cx.stroke();}for(var i=0;i<SS;i++){if(sAge[i]>=MSA)continue;var dd=sDist[i];if(dd<=0||dd>MD)continue;var alpha=Math.max(0,(1-sAge[i]/MSA));if(alpha<0.02)continue;var ang=SM+i,rgb=sRGB(sConf[i]);var op=toXY(ang,dd),ep=toXY(ang,MD);cx.beginPath();cx.moveTo(op.x,op.y);cx.lineTo(ep.x,ep.y);cx.strokeStyle='rgba('+rgb[0]+','+rgb[1]+','+rgb[2]+','+(alpha*0.4).toFixed(3)+')';cx.lineWidth=2;cx.stroke();if(alpha>0.08){cx.beginPath();cx.arc(op.x,op.y,2+alpha*2,0,2*Math.PI);cx.fillStyle='rgba('+rgb[0]+','+rgb[1]+','+rgb[2]+','+(alpha*0.85).toFixed(3)+')';cx.fill();}}for(var t=0;t<trail.length;t++){var a=((t+1)/trail.length)*0.3;var r2=toRad(trail[t]),tx=CX+Math.cos(r2)*R,ty=CY-Math.sin(r2)*R;cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(tx,ty);cx.strokeStyle='rgba(0,250,120,'+a.toFixed(4)+')';cx.lineWidth=1.5;cx.stroke();}sw+=(sys.angle-sw)*0.60;var mr=toRad(sw),mx=CX+Math.cos(mr)*R,my=CY-Math.sin(mr)*R;cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(mx,my);cx.strokeStyle='rgba(0,250,120,0.1)';cx.lineWidth=8;cx.stroke();cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(mx,my);cx.strokeStyle='rgba(0,250,120,0.2)';cx.lineWidth=5;cx.stroke();cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(mx,my);cx.strokeStyle='rgba(0,250,120,0.35)';cx.lineWidth=3;cx.stroke();cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(mx,my);cx.strokeStyle='rgba(0,255,120,0.9)';cx.lineWidth=1.5;cx.stroke();cx.beginPath();cx.arc(CX,CY,R,Math.PI,2*Math.PI);cx.strokeStyle='#0077A8';cx.lineWidth=1.5;cx.stroke();cx.beginPath();cx.arc(CX,CY,5,0,2*Math.PI);cx.fillStyle='#00B4D8';cx.fill();var sc=sCol(sys.confirmed);cx.fillStyle=sc;cx.font='bold 11px Courier New';cx.textAlign='left';cx.fillText(sys.confirmed,8,16);}
- function uPanel(){var c=sCol(sys.confirmed);var sb=document.getElementById('sb');sb.style.borderColor=c;sb.style.backgroundColor=c+'20';if(sys.confirmed==='Critical Flood Risk')sb.className='sbox critical';else if(sys.confirmed==='Waste Detected (Clogged)')sb.className='sbox clogged';else sb.className='sbox';var sv=document.getElementById('sv');sv.style.color=c;sv.textContent=sys.confirmed;document.getElementById('ra').textContent=sys.angle+'\u00b0';document.getElementById('rd').textContent=(sys.dist>0&&sys.dist<=MD)?sys.dist.toFixed(1)+' cm':'NO ECHO';document.getElementById('rp').textContent=sys.depth.toFixed(1)+' cm';document.getElementById('rr').textContent=sys.variance.toFixed(2);var wb=document.getElementById('wb'),wv=document.getElementById('wv');if(sys.waste||sys.clogged){wb.className=sys.clogged?'wbox wclogged':'wbox wactive';wv.style.color=sys.clogged?'#D35400':'#E67E22';wv.textContent=sys.clogged?'CLOGGED':'DETECTED';}else{wb.className='wbox';wv.style.color='#6A8FAA';wv.textContent='CLEAR';}if(sys.confirmed!==lastC&&lastC!=='') aLog('STATUS: '+lastC+' -> '+sys.confirmed,true);updateAlarm(sys.confirmed);lastC=sys.confirmed;}
+function uPanel(){var c=sCol(sys.confirmed);var sb=document.getElementById('sb');sb.style.borderColor=c;sb.style.backgroundColor=c+'20';if(sys.confirmed==='Critical Flood Risk')sb.className='sbox critical';else if(sys.confirmed==='Waste Detected (Clogged)')sb.className='sbox clogged';else sb.className='sbox';var sv=document.getElementById('sv');sv.style.color=c;sv.textContent=sys.confirmed;document.getElementById('ra').textContent=sys.angle+'\u00b0';document.getElementById('rd').textContent=(sys.dist>0&&sys.dist<=MD)?sys.dist.toFixed(1)+' cm':'NO ECHO';document.getElementById('rp').textContent=sys.depth.toFixed(1)+' cm';document.getElementById('rr').textContent=sys.variance.toFixed(2);var wb=document.getElementById('wb'),wv=document.getElementById('wv');if(sys.waste||sys.clogged){wb.className=sys.clogged?'wbox wclogged':'wbox wactive';wv.style.color=sys.clogged?'#D35400':'#E67E22';wv.textContent=sys.clogged?'CLOGGED':'DETECTED';}else{wb.className='wbox';wv.style.color='#6A8FAA';wv.textContent='CLEAR';}if(sys.confirmed!==lastC&&lastC!=='') aLog('STATUS: '+lastC+' -> '+sys.confirmed,true);updateAlarm(sys.confirmed);lastC=sys.confirmed;}
 function dGraph(id,data,mv,th){var g=document.getElementById(id),c=g.getContext('2d');c.clearRect(0,0,g.width,g.height);for(var t=0;t<th.length;t++){var y=g.height-8-((th[t].v/mv)*(g.height-16));c.beginPath();c.moveTo(0,y);c.lineTo(g.width,y);c.strokeStyle=th[t].c+'50';c.lineWidth=1;c.stroke();c.fillStyle=th[t].c;c.font='9px Courier New';c.textAlign='right';c.fillText(th[t].l,g.width-2,y-3);}c.beginPath();for(var i=0;i<HN;i++){var hi=(hI-HN+i+HN*10)%HN;var v=Math.min(data[hi],mv);var px=(i/(HN-1))*g.width,py=g.height-8-(v/mv)*(g.height-16);i===0?c.moveTo(px,py):c.lineTo(px,py);}c.strokeStyle='#00B4D8';c.lineWidth=2;c.stroke();}
-function render(){for(var i=0;i<SS;i++)if(sAge[i]<MSA)sAge[i]++;drawRadar();dGraph('dg',dH,5,[{v:2.0,c:'#F1C40F',l:'ELEV 2.0cm'},{v:4.0,c:'#E74C3C',l:'CRIT 4.0cm'}]);dGraph('vg',vH,10,[{v:4.0,c:'#E67E22',l:'VAR 4.0'}]);requestAnimationFrame(render);}
+function render(){for(var i=0;i<SS;i++)if(sAge[i]<MSA)sAge[i]++;drawRadar();dGraph('dg',dH,5,[{v:3.0,c:'#F1C40F',l:'ELEV 3.0cm'},{v:4.0,c:'#E74C3C',l:'CRIT 4.0cm'}]);dGraph('vg',vH,10,[{v:4.0,c:'#E67E22',l:'VAR 4.0'}]);requestAnimationFrame(render);}
 function connect(){var ws=new WebSocket('ws://'+location.host+'/ws');var dot=document.getElementById('cd'),lbl=document.getElementById('cl');ws.onopen=function(){dot.className='live';lbl.textContent='Live Data Connected';aLog('System online',true);};ws.onmessage=function(e){try{var p=JSON.parse(e.data);if(p.maxDist!==undefined)MD=p.maxDist;if(p.angle!==undefined)sys.angle=p.angle;if(p.dist!==undefined)sys.dist=p.dist;if(p.depth!==undefined)sys.depth=p.depth;if(p.variance!==undefined)sys.variance=p.variance;if(p.obstr!==undefined)sys.obstr=p.obstr;if(p.confirmed!==undefined)sys.confirmed=p.confirmed;if(p.clogged!==undefined)sys.clogged=p.clogged;if(p.waste!==undefined)sys.waste=p.waste;if(p.meanDelta!==undefined)sys.meanDelta=p.meanDelta;var idx=sys.angle-SM;if(idx>=0&&idx<SS){sDist[idx]=sys.dist;sObs[idx]=sys.obstr?1:0;sConf[idx]=sys.confirmed;sAge[idx]=0;}trail.push(sys.angle);if(trail.length>TMAX)trail.shift();dH[hI%HN]=sys.depth;vH[hI%HN]=sys.variance;hI++;logCSV(p);uPanel();}catch(err){}};ws.onclose=function(){dot.className='';lbl.textContent='Reconnecting...';setTimeout(connect,2000);};}var audioCtx=null,audioOn=false,audioMuted=false,alarmInt=null,lastAlarm='',csvRecs=[],lastCSVTime=0;function logCSV(p){var n=Date.now();if(p.confirmed!==lastC||n-lastCSVTime>10000){csvRecs.push([new Date().toISOString(),p.confirmed||'Normal',sys.depth.toFixed(2),sys.variance.toFixed(2),sys.meanDelta.toFixed(2),p.clogged?1:0,sys.waste?1:0,sys.angle,sys.dist>0?sys.dist.toFixed(2):'NO_ECHO',sys.obstr?1:0,(p.effRange||0).toFixed(2)]);lastCSVTime=n;}}function dlCSV(){if(!csvRecs.length){aLog('No data recorded yet',false);return;}var b='Timestamp,Status,Depth_cm,Variance,MeanDelta,Clogged,Waste,Angle,Distance_cm,Obstruction,EffRange_cm\n'+csvRecs.map(function(r){return r.join(',');}).join('\n');var a=document.createElement('a');a.href=URL.createObjectURL(new Blob([b],{type:'text/csv'}));a.download='canal_'+new Date().toISOString().slice(0,10)+'.csv';a.click();aLog('CSV downloaded ('+csvRecs.length+' records)',false);}
 function toggleAudio(){var b=document.getElementById('ab');if(!audioCtx){audioCtx=new(window.AudioContext||window.webkitAudioContext)();audioOn=true;audioMuted=false;b.textContent='MUTE ALERTS';b.className='on';playChime();}else{audioMuted=!audioMuted;if(audioMuted){clearInterval(alarmInt);alarmInt=null;lastAlarm='';b.textContent='UNMUTE ALERTS';b.className='muted';}else{b.textContent='MUTE ALERTS';b.className='on';}}}
 function playTone(f,dur,vol,type){if(!audioCtx||!audioOn||audioMuted)return;var o=audioCtx.createOscillator(),g=audioCtx.createGain();o.connect(g);g.connect(audioCtx.destination);o.frequency.value=f;o.type=type||'sine';g.gain.value=vol||0.12;o.start();g.gain.exponentialRampToValueAtTime(0.001,audioCtx.currentTime+dur/1000);o.stop(audioCtx.currentTime+dur/1000);}
@@ -123,7 +126,8 @@ float readWaterLevel() {
   int raw = analogRead(WL_DATA_PIN);
   digitalWrite(WL_VCC_PIN, LOW);
   if (raw <= 0) return -1.0;
-  float depth = (float)raw * 5.5 / 4095.0;
+  float raw_mapped = (float)raw * WL_RAW_TO_VOLTS;
+  float depth = (raw_mapped - WL_BASE_OFFSET) * WL_SCALE_FACTOR;
   if (depth < WL_NOISE_FLOOR) depth = 0.0;
   if (depth > 5.0) depth = 5.0;
   return depth;}
@@ -171,14 +175,14 @@ bool isObstructed(int angle, float dist) {
   if (idx < 0 || idx >= BASELINE_STEPS) return false;
   if (baseline[idx] > SENSOR_HEIGHT_CM * 2.0) return false;
   if (fabs(baseline[idx] - dist) < 1.5) return false;
-  if (waterDepth > 0 && dist >= (SENSOR_HEIGHT_CM - waterDepth) / max((float)cos(abs(angle - 90) * DEG_TO_RAD), 0.1f) - 1.2f) return false;
+  if (waterDepth > 0 && (fabs(dist - (SENSOR_HEIGHT_CM - waterDepth)) < 0.4f || dist >= (SENSOR_HEIGHT_CM - waterDepth) / max((float)cos(abs(angle - 90) * DEG_TO_RAD), 0.1f) - 0.4f)) return false;
   return ((baseline[idx] - dist) >= OBSTRUCT_THRESH);}
 void pushReading(float d, int angle) {
   if (d < 0 || d > effectiveRange || !baselineReady) return;
   if (angle <= SWEEP_MIN + SWEEP_MARGIN || angle >= SWEEP_MAX - SWEEP_MARGIN) return;
   int idx = (angle - SWEEP_MIN) / SWEEP_STEP;
   if (idx < 0 || idx >= BASELINE_STEPS) return;
-  bool clean = baseline[idx] > SENSOR_HEIGHT_CM * 2.0f || fabs(baseline[idx] - d) < 1.5f || (waterDepth > 0 && d >= (SENSOR_HEIGHT_CM - waterDepth) / max((float)cos(abs(angle - 90) * DEG_TO_RAD), 0.1f) - 1.2f);
+  bool clean = baseline[idx] > SENSOR_HEIGHT_CM * 2.0f || fabs(baseline[idx] - d) < 1.5f || (waterDepth > 0 && (fabs(d - (SENSOR_HEIGHT_CM - waterDepth)) < 0.4f || d >= (SENSOR_HEIGHT_CM - waterDepth) / max((float)cos(abs(angle - 90) * DEG_TO_RAD), 0.1f) - 0.4f));
   buf[bIdx % BUF_SIZE] = clean ? 0.0f : min(fabs(baseline[idx] - d), effectiveRange);
   if (++bIdx >= BUF_SIZE) bufFull = true;}
 float calcVariance() {
@@ -199,7 +203,7 @@ void updateAngleHistory(int angle, float dist) {
   if (angle <= SWEEP_MIN + SWEEP_MARGIN || angle >= SWEEP_MAX - SWEEP_MARGIN) return;
   int idx = (angle - SWEEP_MIN) / SWEEP_STEP;
   if (idx < 0 || idx >= BASELINE_STEPS) return;
-  bool clean = baseline[idx] > SENSOR_HEIGHT_CM * 2.0f || fabs(baseline[idx] - dist) < 1.5f || (waterDepth > 0 && dist >= (SENSOR_HEIGHT_CM - waterDepth) / max((float)cos(abs(angle - 90) * DEG_TO_RAD), 0.1f) - 1.2f);
+  bool clean = baseline[idx] > SENSOR_HEIGHT_CM * 2.0f || fabs(baseline[idx] - dist) < 1.5f || (waterDepth > 0 && (fabs(dist - (SENSOR_HEIGHT_CM - waterDepth)) < 0.4f || dist >= (SENSOR_HEIGHT_CM - waterDepth) / max((float)cos(abs(angle - 90) * DEG_TO_RAD), 0.1f) - 0.4f));
   angleHistory[idx][angleHistCount[idx] % HISTORY_DEPTH] = clean ? 0.0f : fabs(baseline[idx] - dist);
   if (angleHistCount[idx] < HISTORY_DEPTH * 100) angleHistCount[idx]++;}
 void checkClogStatus() {
@@ -245,31 +249,29 @@ void setOutput(Status s) {
   unsigned long now = millis();
   digitalWrite(LED_GREEN, (s == NORMAL) ? HIGH : LOW);
   if (s == WASTE && isClogged) {
-    unsigned long cycle = now % 2000;
-    bool on = (cycle < 100 || (cycle >= 200 && cycle < 300) || (cycle >= 400 && cycle < 500));
+    unsigned long cycle = now % 600;
+    bool on = (cycle < 150);
+    digitalWrite(LED_YELLOW, LOW);
+    digitalWrite(LED_RED, on ? HIGH : LOW);
+    if (on) buzzerOn(); else buzzerOff();}
+  else if (s == WASTE) {
+    unsigned long cycle = now % 1000;
+    bool on = (cycle < 300);
     digitalWrite(LED_YELLOW, on ? HIGH : LOW);
     digitalWrite(LED_RED, LOW);
-    if (on) buzzerOn(); else buzzerOff();
-  } else if (s == WASTE) {
-    unsigned long cycle = now % 2000;
-    bool on = (cycle < 150 || (cycle >= 300 && cycle < 450));
-    digitalWrite(LED_YELLOW, on ? HIGH : LOW);
-    digitalWrite(LED_RED, LOW);
-    if (on) buzzerOn(); else buzzerOff();
-  } else if (s == ELEVATED) {
+    if (on) buzzerOn(); else buzzerOff();}
+  else if (s == ELEVATED) {
     digitalWrite(LED_YELLOW, HIGH);
     digitalWrite(LED_RED, LOW);
-    unsigned long cycle = now % 4000;
-    if (cycle < 120) buzzerOn(); else buzzerOff();
-  } else if (s == CRITICAL) {
+    buzzerOff();}
+  else if (s == CRITICAL) {
     digitalWrite(LED_YELLOW, LOW);
     digitalWrite(LED_RED, HIGH);
-    buzzerOn();
-  } else {
+    buzzerOn();}
+  else {
     digitalWrite(LED_YELLOW, LOW);
     digitalWrite(LED_RED, LOW);
-    buzzerOff();
-  }}
+    buzzerOff();}}
 const char* statusLabel(Status s) {
   switch (s) {
     case NORMAL:   return "Normal";
@@ -277,8 +279,7 @@ const char* statusLabel(Status s) {
     case WASTE:    return isClogged ? "Waste Detected (Clogged)" : "Waste Detected";
     case CRITICAL: return "Critical Flood Risk";
     default:       return "Unknown";}}
-void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
-               AwsEventType type, void* arg, uint8_t* data, size_t len) {
+void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client, AwsEventType type, void* arg, uint8_t* data, size_t len) {
   if (type == WS_EVT_CONNECT) Serial.printf("[WS] Client %u connected\n", client->id());
   else if (type == WS_EVT_DISCONNECT) Serial.printf("[WS] Client %u disconnected\n", client->id());}
 void pushLiveData() {
@@ -348,8 +349,8 @@ void loop() {
   if (sweepDir != prevSweepDir) checkClogStatus();
   if (currentDist > 0 && currentDist <= effectiveRange) {
     pushReading(currentDist, sweepAngle);
-    updateAngleHistory(sweepAngle, currentDist);
-  } else { buf[bIdx % BUF_SIZE] = 0.0; if (++bIdx >= BUF_SIZE) bufFull = true; }
+    updateAngleHistory(sweepAngle, currentDist); }
+  else { buf[bIdx % BUF_SIZE] = 0.0; if (++bIdx >= BUF_SIZE) bufFull = true; }
   if (isObstructed(sweepAngle, currentDist)) obstructionTimer = OBSTRUCTION_HOLD;
   if (obstructionTimer > 0) { obstructionTimer--; obstructionDetected = true; }
   else obstructionDetected = false;
@@ -360,6 +361,4 @@ void loop() {
   updateDebounce(raw);
   static int liveDataCounter = 0;
   if (++liveDataCounter >= 4) { liveDataCounter = 0; pushLiveData(); }
-  Serial.printf("A:%d D:%.1f Dp:%.1f V:%.2f M:%.2f O:%d C:%d S:%s\n",
-                sweepAngle, currentDist, waterDepth, variance, meanDelta,
-                obstructionDetected, isClogged, statusLabel(confirmedStatus));}
+  Serial.printf("A:%d D:%.1f Dp:%.1f V:%.2f M:%.2f O:%d C:%d S:%s\n", sweepAngle, currentDist, waterDepth, variance, meanDelta, obstructionDetected, isClogged, statusLabel(confirmedStatus));}
