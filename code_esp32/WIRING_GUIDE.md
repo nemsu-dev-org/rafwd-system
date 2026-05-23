@@ -44,18 +44,18 @@ All calibration constants are defined at the top of `code_esp32.ino` (lines 16-3
 
 | Constant | Value | Web Label | Notes |
 |---|---|---|---|
-| `SWEEP_MIN` | `35°` | `ANGLE` | Init position and lower sweep boundary. The servo moves to this angle at startup. |
-| `SWEEP_MAX` | `145°` | `ANGLE` | Upper sweep boundary. Total arc = `145 - 35 = 110°`. |
+| `SWEEP_MIN` | `47°` | `ANGLE` | Init position and lower sweep boundary. The servo moves to this angle at startup. |
+| `SWEEP_MAX` | `133°` | `ANGLE` | Upper sweep boundary. Total arc = `133 - 47 = 86°`. |
 | `SWEEP_STEP` | `1°` | - | Angular increment per step. Smaller = finer resolution, slower full sweep. |
-| `SWEEP_MARGIN` | `3°` | - | Dead zone at both ends of the arc. Angles within this margin are excluded from obstruction and clog checks to prevent false positives from sensor edge noise. |
+| `SWEEP_MARGIN` | `5°` | - | Dead zone at both ends of the arc. Angles within this margin are excluded from obstruction and clog checks to prevent false positives from sensor edge noise. |
 
 The `ANGLE` label in the web interface shows the **live current angle** of the servo, updated in real time via WebSocket. It does not show a fixed configured value.
 
 To widen or narrow the arc, edit `SWEEP_MIN` and `SWEEP_MAX`. Also update the `SM` and `SX` JavaScript variables inside the raw HTML string (they mirror `SWEEP_MIN` and `SWEEP_MAX` for the browser-side radar renderer):
 
 ```js
-// Inside INDEX_HTML - line ~71 of code_esp32.ino
-var MD=5.0, SM=35, SX=145, ...
+// Inside INDEX_HTML - line ~73 of code_esp32.ino
+var MD=9.0, SM=47, SX=133, ...
 //          ↑ SWEEP_MIN  ↑ SWEEP_MAX
 ```
 
@@ -67,15 +67,15 @@ Instead of a static range limit, the system dynamically calculates the detection
 
 | Constant | Value | Notes |
 |---|---|---|
-| `SENSOR_MAX_RANGE_CM` | `5.0 cm` | Physical ceiling, used as the dry baseline validation limit. |
-| `WATER_SAFETY_MARGIN` | `0.5 cm` | Buffer zone kept above the water surface to filter out waves and ripples. |
-| `MIN_EFFECTIVE_RANGE` | `1.0 cm` | Minimum allowed range ceiling to ensure proximity scanning remains active. |
+| `SENSOR_HEIGHT_CM` | `9.0 cm` | Physical sensor mounting height above container floor. Used as the baseline validation ceiling. |
+| `WATER_SAFETY_MARGIN` | `1.0 cm` | Buffer zone kept above the water surface to filter out waves and ripples. |
+| `MIN_EFFECTIVE_RANGE` | `2.5 cm` | Minimum allowed range ceiling to ensure proximity scanning remains active. |
 
-The dynamic effective range is computed as:
-`effectiveRange = max(1.0, 5.0 - waterDepth - 0.5)`
+The dynamic effective range is computed per-angle using beam geometry:
+`effectiveRange = max(2.5, min(beam, (SENSOR_HEIGHT_CM - waterDepth) / cosA - WATER_SAFETY_MARGIN))`
 
-*   **Dry State (0.0 cm depth)**: `effectiveRange = 4.5 cm`. The sensor scans down to 4.5 cm.
-*   **High Water (3.0 cm depth)**: `effectiveRange = 1.5 cm`. The sensor ignores everything below 1.5 cm (the water surface) to avoid false obstruction flags.
+*   **Dry State (0.0 cm depth)**: `effectiveRange = min(beam, 9.0)`. Range is capped by sensor height.
+*   **High Water (3.0 cm depth)**: `effectiveRange = max(2.5, min(beam, 4.85))`. The surface is masked.
 
 The `DISTANCE` label in the web interface shows the **live measured distance** from the HC-SR04 at the current sweep angle. It displays `NO ECHO` when no valid return is detected within range. The radar interface auto-scales dynamically based on `effectiveRange` sent via the `maxDist` WebSocket field.
 
@@ -89,7 +89,7 @@ The `DISTANCE` label in the web interface shows the **live measured distance** f
 | `DEPTH_CRITICAL` | `4.0 cm` | `DEPTH` | Water depth at which the system escalates to **Critical Flood Risk**. |
 | `WL_EMA_ALPHA` | `0.8` | - | Exponential Moving Average smoothing factor for depth readings. Higher = more responsive, lower = smoother. |
 
-The `DEPTH` label shows the **live EMA-filtered water depth** in centimeters. The raw ADC reading from GPIO 34 is mapped to depth using: `depth = raw * 30.0 / 4095.0`, giving a 0-30 cm effective scale.
+The `DEPTH` label shows the **live EMA-filtered water depth** in centimeters. The raw ADC reading from GPIO 34 is mapped to depth using: `depth = raw * 5.5 / 4095.0`, giving a 0–5 cm effective scale (HW-038 calibrated).
 
 ---
 
