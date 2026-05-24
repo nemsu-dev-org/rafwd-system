@@ -23,17 +23,20 @@ const int SWEEP_MAX = 133;
 const int SWEEP_STEP = 1;
 const int SWEEP_MARGIN = 5;
 const unsigned long STEP_INTERVAL_MS = 40;
-const float OBSTRUCT_THRESH = 1.2;
-const float DEPTH_ELEVATED = 3.0;
-const float DEPTH_CRITICAL = 4.0;
+const unsigned long DWELL_INTERVAL_MS = 120;
+const float OBSTRUCT_THRESH = 0.8;
+const float BASELINE_TOLERANCE = 0.8;
+const float WATER_SURF_TOLERANCE = 0.2;
+const float DEPTH_ELEVATED = 4.0;
+const float DEPTH_CRITICAL = 4.5;
 const float WL_NOISE_FLOOR = 0.3;
-const float VARIANCE_THRESH = 2.5;
-const float MEAN_DELTA_THRESH = 1.5;
+const float VARIANCE_THRESH = 1.2;
+const float MEAN_DELTA_THRESH = 1.0;
 const int OBSTRUCTION_HOLD = 13;
-const int HISTORY_DEPTH = 2;
+const int HISTORY_DEPTH = 1;
 const float STATIC_VAR_THRESH = 2.0;
-const float STATIC_DELTA_THRESH = 2.0;
-const int CLOG_ANGLE_COUNT = 3;
+const float STATIC_DELTA_THRESH = 3.0;
+const int CLOG_ANGLE_COUNT = 5;
 const float SIMULATED_WATER_DEPTH = 0.0;
 const float WL_EMA_ALPHA = 0.8;
 const float WL_RAW_TO_VOLTS = 5.5 / 4095.0;
@@ -42,12 +45,15 @@ const float WL_SCALE_FACTOR = 10.0;
 const int BASELINE_STEPS = (SWEEP_MAX - SWEEP_MIN) / SWEEP_STEP + 1;
 float baseline[BASELINE_STEPS];
 bool baselineReady = false;
-const int BUF_SIZE = 12;
+const int BUF_SIZE = 6;
 float buf[BUF_SIZE];
 int bIdx = 0;
 bool bufFull = false;
-const int DEBOUNCE_ESCALATE = 10;
-const int DEBOUNCE_DEESCALATE = 25;
+const int DEBOUNCE_ESCALATE = 5;
+const int DEBOUNCE_ESCALATE_WL = 12;
+const int DEBOUNCE_DEESCALATE = 30;
+const unsigned long STATE_HOLD_TO_NORMAL_MS = 6000;
+const unsigned long STATE_HOLD_BETWEEN_MS = 4000;
 enum Status { NORMAL, ELEVATED, WASTE, CRITICAL };
 bool wasteActive = false;
 int wlCounter = 0;
@@ -62,9 +68,11 @@ Status confirmedStatus = NORMAL;
 Status candidateStatus = NORMAL;
 int candidateCount = 0;
 unsigned long lastStepTime = 0;
+unsigned long stateConfirmedAt = 0;
 float angleHistory[BASELINE_STEPS][HISTORY_DEPTH];
 int angleHistCount[BASELINE_STEPS];
 bool isClogged = false;
+int obstructedAngleMin = -1, obstructedAngleMax = -1;
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws");
 DNSServer dnsServer;
@@ -75,17 +83,17 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <div id="main"><canvas id="radar"></canvas><div id="panel"><div class="ptitle">SYSTEM STATUS</div><div class="sbox" id="sb"><div class="slbl">CONFIRMED STATUS</div><div class="sval" id="sv">---</div></div><div id="metrics"><div class="metric-card"><div class="m-lbl">ANGLE</div><div class="m-val" id="ra">---</div></div><div class="metric-card"><div class="m-lbl">DISTANCE</div><div class="m-val" id="rd">---</div></div><div class="metric-card"><div class="m-lbl">DEPTH</div><div class="m-val" id="rp">---</div></div><div class="metric-card"><div class="m-lbl">VARIANCE</div><div class="m-val" id="rr">---</div></div></div><div class="wbox" id="wb"><div class="slbl">WASTE DETECTION</div><div class="sval" id="wv" style="color:#6A8FAA">CLEAR</div></div><div id="log"></div><button id="dlb" onclick="dlCSV()">&#11123; DOWNLOAD CSV</button></div></div>
 <div id="graphs"><div class="gb"><div class="gt">WATER DEPTH HISTORY (cm)</div><canvas id="dg" class="ch" width="400" height="80"></canvas></div><div class="gb"><div class="gt">VARIANCE HISTORY</div><canvas id="vg" class="ch" width="400" height="80"></canvas></div></div>
 <script>var MD=9.0,SM=47,SX=133,SS=SX-SM+1,MSA=200;var rc=document.getElementById('radar'),cx=rc.getContext('2d');var dpr=window.devicePixelRatio||1;var CX,CY,R;
-function initRadar(){var w=rc.clientWidth,h=rc.clientHeight;if(w<100)w=800; if(h<60)h=460;rc.width=Math.round(w*dpr);rc.height=Math.round(h*dpr);cx.setTransform(dpr,0,0,dpr,0,0);CX=w/2;CY=h-30;R=Math.min(CX-20,CY-20);}initRadar();var sw=SM;var sDist=new Float32Array(SS).fill(-1);var sAge=new Float32Array(SS).fill(9999);var sObs=new Uint8Array(SS).fill(0);var sConf=new Array(SS).fill('Normal');var trail=[];var TMAX=30;var sys={angle:90,dist:-1,depth:0,variance:0,meanDelta:0,obstr:false,confirmed:'Normal',clogged:false,waste:false};var lastC='';var logE=document.getElementById('log');var HN=120,dH=new Float32Array(HN),vH=new Float32Array(HN),hI=0;
+function initRadar(){var w=rc.clientWidth,h=rc.clientHeight;if(w<100)w=800; if(h<60)h=460;rc.width=Math.round(w*dpr);rc.height=Math.round(h*dpr);cx.setTransform(dpr,0,0,dpr,0,0);CX=w/2;CY=h-30;R=Math.min(CX-20,CY-20);}initRadar();var sw=SM;var sDist=new Float32Array(SS).fill(-1);var sAge=new Float32Array(SS).fill(9999);var sObs=new Uint8Array(SS).fill(0);var sConf=new Array(SS).fill('Normal');var trail=[];var TMAX=60;var sys={angle:90,dist:-1,depth:0,variance:0,meanDelta:0,obstr:false,rawObs:false,confirmed:'Normal',clogged:false,waste:false};var lastC='';var logE=document.getElementById('log');var HN=120,dH=new Float32Array(HN),vH=new Float32Array(HN),hI=0;
 function sCol(s){if(s==='Normal')return'#2ECC71';if(s==='Elevated')return'#F1C40F';if(s==='Waste Detected')return'#E67E22';if(s==='Waste Detected (Clogged)')return'#D35400';if(s==='Critical Flood Risk')return'#E74C3C';return'#6A8FAA';}
 function sRGB(s){if(s==='Normal')return[46,204,113];if(s==='Elevated')return[241,196,15];if(s==='Waste Detected')return[230,126,34];if(s==='Waste Detected (Clogged)')return[211,84,0];if(s==='Critical Flood Risk')return[231,76,60];return[106,143,170];}
 function aLog(m,h){var d=new Date();var t=('0'+d.getHours()).slice(-2)+':'+('0'+d.getMinutes()).slice(-2)+':'+('0'+d.getSeconds()).slice(-2);var e=document.createElement('div');e.className='le'+(h?' ch':'');e.textContent='['+t+'] '+m;logE.prepend(e);while(logE.children.length>25)logE.removeChild(logE.lastChild);}
-function toRad(a){ var s=((a-SM)/(SX-SM))*180; return(180-s)*Math.PI/180; }
+function toRad(a){ return(180-a)*Math.PI/180; }
 function toXY(a,d){ var r=toRad(a),f=Math.min(d/MD,1); return{x:CX+Math.cos(r)*R*f,y:CY-Math.sin(r)*R*f}; }
-function drawRadar(){var w=rc.width/dpr,h=rc.height/dpr;cx.clearRect(0,0,w,h);cx.fillStyle='#050E18';cx.beginPath();cx.arc(CX,CY,R,Math.PI,2*Math.PI);cx.fill();var rings=[.25,.5,.75,1];for(var i=0;i<4;i++){var rr=R*rings[i];cx.beginPath();cx.arc(CX,CY,rr,Math.PI,2*Math.PI);cx.strokeStyle='rgba(0,200,120,0.25)';cx.lineWidth=.5;cx.stroke();cx.fillStyle='rgba(0,255,120,0.6)';cx.font='11px Courier New';cx.textAlign='left';cx.fillText((MD*rings[i]).toFixed(1)+'cm',CX+4,CY-rr+14);}cx.textAlign='center';for(var d=SM;d<=SX;d+=Math.round((SX-SM)/4)){var p=toXY(d,MD);cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(p.x,p.y);cx.strokeStyle='rgba(0,200,120,0.25)';cx.lineWidth=.5;cx.stroke();var lp=toXY(d,MD*1.12);cx.fillStyle='rgba(0,255,120,0.7)';cx.font='11px Courier New';cx.fillText(d+'\u00b0',lp.x,lp.y);}cx.beginPath();cx.moveTo(CX-R-8,CY);cx.lineTo(CX+R+8,CY);cx.strokeStyle='rgba(0,200,120,0.4)';cx.lineWidth=1;cx.stroke();for(var i=0;i<SS;i++){if(sAge[i]>=MSA)continue;var alpha=(1-sAge[i]/MSA)*0.18;if(alpha<0.01)continue;var ang=SM+i,tp=toXY(ang,MD);cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(tp.x,tp.y);cx.strokeStyle='rgba(0,250,120,'+alpha.toFixed(3)+')';cx.lineWidth=1.5;cx.stroke();}for(var i=0;i<SS;i++){if(sAge[i]>=MSA)continue;var dd=sDist[i];if(dd<=0||dd>MD)continue;var alpha=Math.max(0,(1-sAge[i]/MSA));if(alpha<0.02)continue;var ang=SM+i,rgb=sRGB(sConf[i]);var op=toXY(ang,dd),ep=toXY(ang,MD);cx.beginPath();cx.moveTo(op.x,op.y);cx.lineTo(ep.x,ep.y);cx.strokeStyle='rgba('+rgb[0]+','+rgb[1]+','+rgb[2]+','+(alpha*0.4).toFixed(3)+')';cx.lineWidth=2;cx.stroke();if(alpha>0.08){cx.beginPath();cx.arc(op.x,op.y,2+alpha*2,0,2*Math.PI);cx.fillStyle='rgba('+rgb[0]+','+rgb[1]+','+rgb[2]+','+(alpha*0.85).toFixed(3)+')';cx.fill();}}for(var t=0;t<trail.length;t++){var a=((t+1)/trail.length)*0.3;var r2=toRad(trail[t]),tx=CX+Math.cos(r2)*R,ty=CY-Math.sin(r2)*R;cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(tx,ty);cx.strokeStyle='rgba(0,250,120,'+a.toFixed(4)+')';cx.lineWidth=1.5;cx.stroke();}sw+=(sys.angle-sw)*0.60;var mr=toRad(sw),mx=CX+Math.cos(mr)*R,my=CY-Math.sin(mr)*R;cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(mx,my);cx.strokeStyle='rgba(0,250,120,0.1)';cx.lineWidth=8;cx.stroke();cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(mx,my);cx.strokeStyle='rgba(0,250,120,0.2)';cx.lineWidth=5;cx.stroke();cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(mx,my);cx.strokeStyle='rgba(0,250,120,0.35)';cx.lineWidth=3;cx.stroke();cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(mx,my);cx.strokeStyle='rgba(0,255,120,0.9)';cx.lineWidth=1.5;cx.stroke();cx.beginPath();cx.arc(CX,CY,R,Math.PI,2*Math.PI);cx.strokeStyle='#0077A8';cx.lineWidth=1.5;cx.stroke();cx.beginPath();cx.arc(CX,CY,5,0,2*Math.PI);cx.fillStyle='#00B4D8';cx.fill();var sc=sCol(sys.confirmed);cx.fillStyle=sc;cx.font='bold 11px Courier New';cx.textAlign='left';cx.fillText(sys.confirmed,8,16);}
+function drawRadar(){var w=rc.width/dpr,h=rc.height/dpr;cx.clearRect(0,0,w,h);cx.fillStyle='#050E18';cx.beginPath();cx.arc(CX,CY,R,Math.PI,2*Math.PI);cx.fill();var rings=[.25,.5,.75,1];for(var i=0;i<4;i++){var rr=R*rings[i];cx.beginPath();cx.arc(CX,CY,rr,Math.PI,2*Math.PI);cx.strokeStyle='rgba(0,200,120,0.25)';cx.lineWidth=.5;cx.stroke();cx.fillStyle='rgba(0,255,120,0.6)';cx.font='11px Courier New';cx.textAlign='left';cx.fillText((MD*rings[i]).toFixed(1)+'cm',CX+4,CY-rr+14);}cx.textAlign='center';for(var d=0;d<=180;d+=45){var p=toXY(d,MD);cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(p.x,p.y);cx.strokeStyle='rgba(0,200,120,0.25)';cx.lineWidth=.5;cx.stroke();var lp=toXY(d,MD*1.12);cx.fillStyle='rgba(0,255,120,0.7)';cx.font='11px Courier New';cx.fillText(d+'\u00b0',lp.x,lp.y);}cx.beginPath();cx.moveTo(CX-R-8,CY);cx.lineTo(CX+R+8,CY);cx.strokeStyle='rgba(0,200,120,0.4)';cx.lineWidth=1;cx.stroke();var clusters=[];var inCluster=false;var cStart=0;var last1=-1;for(var i=0;i<SS;i++){if(sObs[i]==1){if(!inCluster){inCluster=true;cStart=i;}last1=i;}else{if(inCluster&&(i-last1>5)){clusters.push({s:cStart,e:last1});inCluster=false;}}}if(inCluster)clusters.push({s:cStart,e:last1});var tNow=Date.now();for(var c=0;c<clusters.length;c++){var cl=clusters[c];var sumDist=0,count=0;var maxStatus='Waste Detected';for(var i=cl.s;i<=cl.e;i++){if(sDist[i]>0){sumDist+=sDist[i];count++;}if(sConf[i]=='Waste Detected (Clogged)'||sConf[i]=='Critical Flood Risk')maxStatus=sConf[i];}if(count==0)continue;var avgDist=sumDist/count;var centerAng=SM+(cl.s+cl.e)/2;var op=toXY(centerAng,avgDist);var beat=(tNow%1000)/1000;var pulse=0;if(beat<0.2)pulse=Math.sin(beat*Math.PI*5);else if(beat>0.3&&beat<0.5)pulse=Math.sin((beat-0.3)*Math.PI*5);var rad=4+2*Math.max(0,pulse);var rgb=sRGB(maxStatus);cx.beginPath();cx.arc(op.x,op.y,rad,0,2*Math.PI);cx.fillStyle='rgba('+rgb[0]+','+rgb[1]+','+rgb[2]+',1.0)';cx.fill();}for(var t=0;t<trail.length;t++){var a=((t+1)/trail.length)*0.3;var r2=toRad(trail[t]),tx=CX+Math.cos(r2)*R,ty=CY-Math.sin(r2)*R;cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(tx,ty);cx.strokeStyle='rgba(0,250,120,'+a.toFixed(4)+')';cx.lineWidth=1.5;cx.stroke();}sw+=(sys.angle-sw)*0.60;trail.push(sw);if(trail.length>TMAX)trail.shift();var mr=toRad(sw),mx=CX+Math.cos(mr)*R,my=CY-Math.sin(mr)*R;cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(mx,my);cx.strokeStyle='rgba(0,250,120,0.1)';cx.lineWidth=8;cx.stroke();cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(mx,my);cx.strokeStyle='rgba(0,250,120,0.2)';cx.lineWidth=5;cx.stroke();cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(mx,my);cx.strokeStyle='rgba(0,250,120,0.35)';cx.lineWidth=3;cx.stroke();cx.beginPath();cx.moveTo(CX,CY);cx.lineTo(mx,my);cx.strokeStyle='rgba(0,255,120,0.9)';cx.lineWidth=1.5;cx.stroke();cx.beginPath();cx.arc(CX,CY,R,Math.PI,2*Math.PI);cx.strokeStyle='#0077A8';cx.lineWidth=1.5;cx.stroke();cx.beginPath();cx.arc(CX,CY,5,0,2*Math.PI);cx.fillStyle='#00B4D8';cx.fill();var sc=sCol(sys.confirmed);cx.fillStyle=sc;cx.font='bold 11px Courier New';cx.textAlign='left';cx.fillText(sys.confirmed,8,16);}
 function uPanel(){var c=sCol(sys.confirmed);var sb=document.getElementById('sb');sb.style.borderColor=c;sb.style.backgroundColor=c+'20';if(sys.confirmed==='Critical Flood Risk')sb.className='sbox critical';else if(sys.confirmed==='Waste Detected (Clogged)')sb.className='sbox clogged';else sb.className='sbox';var sv=document.getElementById('sv');sv.style.color=c;sv.textContent=sys.confirmed;document.getElementById('ra').textContent=sys.angle+'\u00b0';document.getElementById('rd').textContent=(sys.dist>0&&sys.dist<=MD)?sys.dist.toFixed(1)+' cm':'NO ECHO';document.getElementById('rp').textContent=sys.depth.toFixed(1)+' cm';document.getElementById('rr').textContent=sys.variance.toFixed(2);var wb=document.getElementById('wb'),wv=document.getElementById('wv');if(sys.waste||sys.clogged){wb.className=sys.clogged?'wbox wclogged':'wbox wactive';wv.style.color=sys.clogged?'#D35400':'#E67E22';wv.textContent=sys.clogged?'CLOGGED':'DETECTED';}else{wb.className='wbox';wv.style.color='#6A8FAA';wv.textContent='CLEAR';}if(sys.confirmed!==lastC&&lastC!=='') aLog('STATUS: '+lastC+' -> '+sys.confirmed,true);updateAlarm(sys.confirmed);lastC=sys.confirmed;}
 function dGraph(id,data,mv,th){var g=document.getElementById(id),c=g.getContext('2d');c.clearRect(0,0,g.width,g.height);for(var t=0;t<th.length;t++){var y=g.height-8-((th[t].v/mv)*(g.height-16));c.beginPath();c.moveTo(0,y);c.lineTo(g.width,y);c.strokeStyle=th[t].c+'50';c.lineWidth=1;c.stroke();c.fillStyle=th[t].c;c.font='9px Courier New';c.textAlign='right';c.fillText(th[t].l,g.width-2,y-3);}c.beginPath();for(var i=0;i<HN;i++){var hi=(hI-HN+i+HN*10)%HN;var v=Math.min(data[hi],mv);var px=(i/(HN-1))*g.width,py=g.height-8-(v/mv)*(g.height-16);i===0?c.moveTo(px,py):c.lineTo(px,py);}c.strokeStyle='#00B4D8';c.lineWidth=2;c.stroke();}
 function render(){for(var i=0;i<SS;i++)if(sAge[i]<MSA)sAge[i]++;drawRadar();dGraph('dg',dH,5,[{v:3.0,c:'#F1C40F',l:'ELEV 3.0cm'},{v:4.0,c:'#E74C3C',l:'CRIT 4.0cm'}]);dGraph('vg',vH,10,[{v:4.0,c:'#E67E22',l:'VAR 4.0'}]);requestAnimationFrame(render);}
-function connect(){var ws=new WebSocket('ws://'+location.host+'/ws');var dot=document.getElementById('cd'),lbl=document.getElementById('cl');ws.onopen=function(){dot.className='live';lbl.textContent='Live Data Connected';aLog('System online',true);};ws.onmessage=function(e){try{var p=JSON.parse(e.data);if(p.maxDist!==undefined)MD=p.maxDist;if(p.angle!==undefined)sys.angle=p.angle;if(p.dist!==undefined)sys.dist=p.dist;if(p.depth!==undefined)sys.depth=p.depth;if(p.variance!==undefined)sys.variance=p.variance;if(p.obstr!==undefined)sys.obstr=p.obstr;if(p.confirmed!==undefined)sys.confirmed=p.confirmed;if(p.clogged!==undefined)sys.clogged=p.clogged;if(p.waste!==undefined)sys.waste=p.waste;if(p.meanDelta!==undefined)sys.meanDelta=p.meanDelta;var idx=sys.angle-SM;if(idx>=0&&idx<SS){sDist[idx]=sys.dist;sObs[idx]=sys.obstr?1:0;sConf[idx]=sys.confirmed;sAge[idx]=0;}trail.push(sys.angle);if(trail.length>TMAX)trail.shift();dH[hI%HN]=sys.depth;vH[hI%HN]=sys.variance;hI++;logCSV(p);uPanel();}catch(err){}};ws.onclose=function(){dot.className='';lbl.textContent='Reconnecting...';setTimeout(connect,2000);};}var audioCtx=null,audioOn=false,audioMuted=false,alarmInt=null,lastAlarm='',csvRecs=[],lastCSVTime=0;function logCSV(p){var n=Date.now();if(p.confirmed!==lastC||n-lastCSVTime>10000){csvRecs.push([new Date().toISOString(),p.confirmed||'Normal',sys.depth.toFixed(2),sys.variance.toFixed(2),sys.meanDelta.toFixed(2),p.clogged?1:0,sys.waste?1:0,sys.angle,sys.dist>0?sys.dist.toFixed(2):'NO_ECHO',sys.obstr?1:0,(p.effRange||0).toFixed(2)]);lastCSVTime=n;}}function dlCSV(){if(!csvRecs.length){aLog('No data recorded yet',false);return;}var b='Timestamp,Status,Depth_cm,Variance,MeanDelta,Clogged,Waste,Angle,Distance_cm,Obstruction,EffRange_cm\n'+csvRecs.map(function(r){return r.join(',');}).join('\n');var a=document.createElement('a');a.href=URL.createObjectURL(new Blob([b],{type:'text/csv'}));a.download='canal_'+new Date().toISOString().slice(0,10)+'.csv';a.click();aLog('CSV downloaded ('+csvRecs.length+' records)',false);}
+function connect(){var ws=new WebSocket('ws://'+location.host+'/ws');var dot=document.getElementById('cd'),lbl=document.getElementById('cl');ws.onopen=function(){dot.className='live';lbl.textContent='Live Data Connected';aLog('System online',true);};ws.onmessage=function(e){try{var p=JSON.parse(e.data);if(p.maxDist!==undefined)MD=p.maxDist;if(p.angle!==undefined)sys.angle=p.angle;if(p.dist!==undefined)sys.dist=p.dist;if(p.depth!==undefined)sys.depth=p.depth;if(p.variance!==undefined)sys.variance=p.variance;if(p.obstr!==undefined)sys.obstr=p.obstr;if(p.confirmed!==undefined)sys.confirmed=p.confirmed;if(p.clogged!==undefined)sys.clogged=p.clogged;if(p.waste!==undefined)sys.waste=p.waste;if(p.meanDelta!==undefined)sys.meanDelta=p.meanDelta;if(p.rawObs!==undefined)sys.rawObs=p.rawObs;var idx=sys.angle-SM;if(idx>=0&&idx<SS){sDist[idx]=sys.dist;sObs[idx]=sys.rawObs?1:0;sConf[idx]=sys.confirmed;sAge[idx]=0;}dH[hI%HN]=sys.depth;vH[hI%HN]=sys.variance;hI++;logCSV(p);uPanel();}catch(err){}};ws.onclose=function(){dot.className='';lbl.textContent='Reconnecting...';setTimeout(connect,2000);};}var audioCtx=null,audioOn=false,audioMuted=false,alarmInt=null,lastAlarm='',csvRecs=[],lastCSVTime=0;function logCSV(p){var n=Date.now();if(p.confirmed!==lastC||n-lastCSVTime>10000){csvRecs.push([new Date().toISOString(),p.confirmed||'Normal',sys.depth.toFixed(2),sys.variance.toFixed(2),sys.meanDelta.toFixed(2),p.clogged?1:0,sys.waste?1:0,sys.angle,sys.dist>0?sys.dist.toFixed(2):'NO_ECHO',sys.obstr?1:0,(p.effRange||0).toFixed(2)]);lastCSVTime=n;}}function dlCSV(){if(!csvRecs.length){aLog('No data recorded yet',false);return;}var b='Timestamp,Status,Depth_cm,Variance,MeanDelta,Clogged,Waste,Angle,Distance_cm,Obstruction,EffRange_cm\n'+csvRecs.map(function(r){return r.join(',');}).join('\n');var a=document.createElement('a');a.href=URL.createObjectURL(new Blob([b],{type:'text/csv'}));a.download='canal_'+new Date().toISOString().slice(0,10)+'.csv';a.click();aLog('CSV downloaded ('+csvRecs.length+' records)',false);}
 function toggleAudio(){var b=document.getElementById('ab');if(!audioCtx){audioCtx=new(window.AudioContext||window.webkitAudioContext)();audioOn=true;audioMuted=false;b.textContent='MUTE ALERTS';b.className='on';playChime();}else{audioMuted=!audioMuted;if(audioMuted){clearInterval(alarmInt);alarmInt=null;lastAlarm='';b.textContent='UNMUTE ALERTS';b.className='muted';}else{b.textContent='MUTE ALERTS';b.className='on';}}}
 function playTone(f,dur,vol,type){if(!audioCtx||!audioOn||audioMuted)return;var o=audioCtx.createOscillator(),g=audioCtx.createGain();o.connect(g);g.connect(audioCtx.destination);o.frequency.value=f;o.type=type||'sine';g.gain.value=vol||0.12;o.start();g.gain.exponentialRampToValueAtTime(0.001,audioCtx.currentTime+dur/1000);o.stop(audioCtx.currentTime+dur/1000);}
 function playChime(){playTone(523,150,0.08,'sine');setTimeout(function(){playTone(659,150,0.08,'sine');},160);setTimeout(function(){playTone(784,200,0.08,'sine');},320);}
@@ -174,15 +182,15 @@ bool isObstructed(int angle, float dist) {
   int idx = (angle - SWEEP_MIN) / SWEEP_STEP;
   if (idx < 0 || idx >= BASELINE_STEPS) return false;
   if (baseline[idx] > SENSOR_HEIGHT_CM * 2.0) return false;
-  if (fabs(baseline[idx] - dist) < 1.5) return false;
-  if (waterDepth > 0 && (fabs(dist - (SENSOR_HEIGHT_CM - waterDepth)) < 0.4f || dist >= (SENSOR_HEIGHT_CM - waterDepth) / max((float)cos(abs(angle - 90) * DEG_TO_RAD), 0.1f) - 0.4f)) return false;
+  if (fabs(baseline[idx] - dist) < BASELINE_TOLERANCE) return false;
+  if (waterDepth > 0 && (fabs(dist - (SENSOR_HEIGHT_CM - waterDepth)) < WATER_SURF_TOLERANCE || dist >= (SENSOR_HEIGHT_CM - waterDepth) / max((float)cos(abs(angle - 90) * DEG_TO_RAD), 0.1f) - WATER_SURF_TOLERANCE)) return false;
   return ((baseline[idx] - dist) >= OBSTRUCT_THRESH);}
 void pushReading(float d, int angle) {
   if (d < 0 || d > effectiveRange || !baselineReady) return;
   if (angle <= SWEEP_MIN + SWEEP_MARGIN || angle >= SWEEP_MAX - SWEEP_MARGIN) return;
   int idx = (angle - SWEEP_MIN) / SWEEP_STEP;
   if (idx < 0 || idx >= BASELINE_STEPS) return;
-  bool clean = baseline[idx] > SENSOR_HEIGHT_CM * 2.0f || fabs(baseline[idx] - d) < 1.5f || (waterDepth > 0 && (fabs(d - (SENSOR_HEIGHT_CM - waterDepth)) < 0.4f || d >= (SENSOR_HEIGHT_CM - waterDepth) / max((float)cos(abs(angle - 90) * DEG_TO_RAD), 0.1f) - 0.4f));
+  bool clean = baseline[idx] > SENSOR_HEIGHT_CM * 2.0f || fabs(baseline[idx] - d) < BASELINE_TOLERANCE || (waterDepth > 0 && (fabs(d - (SENSOR_HEIGHT_CM - waterDepth)) < WATER_SURF_TOLERANCE || d >= (SENSOR_HEIGHT_CM - waterDepth) / max((float)cos(abs(angle - 90) * DEG_TO_RAD), 0.1f) - WATER_SURF_TOLERANCE));
   buf[bIdx % BUF_SIZE] = clean ? 0.0f : min(fabs(baseline[idx] - d), effectiveRange);
   if (++bIdx >= BUF_SIZE) bufFull = true;}
 float calcVariance() {
@@ -203,7 +211,7 @@ void updateAngleHistory(int angle, float dist) {
   if (angle <= SWEEP_MIN + SWEEP_MARGIN || angle >= SWEEP_MAX - SWEEP_MARGIN) return;
   int idx = (angle - SWEEP_MIN) / SWEEP_STEP;
   if (idx < 0 || idx >= BASELINE_STEPS) return;
-  bool clean = baseline[idx] > SENSOR_HEIGHT_CM * 2.0f || fabs(baseline[idx] - dist) < 1.5f || (waterDepth > 0 && (fabs(dist - (SENSOR_HEIGHT_CM - waterDepth)) < 0.4f || dist >= (SENSOR_HEIGHT_CM - waterDepth) / max((float)cos(abs(angle - 90) * DEG_TO_RAD), 0.1f) - 0.4f));
+  bool clean = baseline[idx] > SENSOR_HEIGHT_CM * 2.0f || fabs(baseline[idx] - dist) < BASELINE_TOLERANCE || (waterDepth > 0 && (fabs(dist - (SENSOR_HEIGHT_CM - waterDepth)) < WATER_SURF_TOLERANCE || dist >= (SENSOR_HEIGHT_CM - waterDepth) / max((float)cos(abs(angle - 90) * DEG_TO_RAD), 0.1f) - WATER_SURF_TOLERANCE));
   angleHistory[idx][angleHistCount[idx] % HISTORY_DEPTH] = clean ? 0.0f : fabs(baseline[idx] - dist);
   if (angleHistCount[idx] < HISTORY_DEPTH * 100) angleHistCount[idx]++;}
 void checkClogStatus() {
@@ -224,27 +232,31 @@ void checkClogStatus() {
   if (isClogged) Serial.printf("[CLOG] Detected %d adjacent static angles\n", maxConsecutive);}
 Status classify(float depth, float variance, float meanDelta, bool obstruction) {
   wasteActive = variance > VARIANCE_THRESH || meanDelta > MEAN_DELTA_THRESH;
-  if (depth >= DEPTH_CRITICAL) return CRITICAL;
+  if (depth >= DEPTH_CRITICAL && isClogged) return CRITICAL;
   if (wasteActive) return WASTE;
   if (depth >= DEPTH_ELEVATED) return ELEVATED;
   return NORMAL;}
 void updateDebounce(Status raw) {
   if (raw == candidateStatus) candidateCount++;
   else { candidateStatus = raw; candidateCount = 1; }
+  bool escalating = (int)raw > (int)confirmedStatus;
+  bool deescalating = (int)raw < (int)confirmedStatus;
   int needed;
-  if ((int)raw > (int)confirmedStatus) needed = DEBOUNCE_ESCALATE;
-  else if ((int)raw < (int)confirmedStatus) needed = DEBOUNCE_DEESCALATE;
+  if (escalating) needed = (raw == WASTE) ? DEBOUNCE_ESCALATE : DEBOUNCE_ESCALATE_WL;
+  else if (deescalating) needed = DEBOUNCE_DEESCALATE;
   else needed = DEBOUNCE_ESCALATE;
-  if (candidateCount >= needed) {
+  unsigned long holdRequired = (raw == NORMAL) ? STATE_HOLD_TO_NORMAL_MS : STATE_HOLD_BETWEEN_MS;
+  if (candidateCount >= needed && (!deescalating || millis() - stateConfirmedAt >= holdRequired)) {
     Status prev = confirmedStatus;
     confirmedStatus = candidateStatus;
-    candidateCount  = needed;
+    candidateCount = needed;
+    stateConfirmedAt = millis();
     if (confirmedStatus == NORMAL && prev != NORMAL) {
       for (int i = 0; i < BUF_SIZE; i++) buf[i] = 0.0;
       bIdx = 0; bufFull = false;
       memset(angleHistCount, 0, sizeof(angleHistCount));
       isClogged = false; obstructionTimer = 0; obstructionDetected = false;
-      wasteActive = false;}}}
+      wasteActive = false; obstructedAngleMin = -1; obstructedAngleMax = -1;}}}
 void setOutput(Status s) {
   unsigned long now = millis();
   digitalWrite(LED_GREEN, (s == NORMAL) ? HIGH : LOW);
@@ -293,6 +305,7 @@ void pushLiveData() {
   doc["variance"]     = calcVariance();
   doc["meanDelta"]    = calcMeanDelta();
   doc["obstr"]        = obstructionDetected;
+  doc["rawObs"]       = isObstructed(sweepAngle, currentDist);
   doc["confirmed"]    = statusLabel(confirmedStatus);
   doc["clogged"]      = isClogged;
   doc["waste"]        = wasteActive;
@@ -340,25 +353,23 @@ void loop() {
   dnsServer.processNextRequest();
   setOutput(confirmedStatus);
   unsigned long now = millis();
-  if (now - lastStepTime < STEP_INTERVAL_MS) { delay(1); return; }
+  unsigned long interval = (obstructedAngleMin > 0 && sweepAngle >= obstructedAngleMin && sweepAngle <= obstructedAngleMax) ? DWELL_INTERVAL_MS : STEP_INTERVAL_MS;
+  if (now - lastStepTime < interval) { delay(1); return; }
   lastStepTime = now;
   int prevSweepDir = sweepDir;
   stepServo();
   effectiveRange = calcAngleRange(sweepAngle);
   currentDist = readUltrasonicMedian();
   if (sweepDir != prevSweepDir) checkClogStatus();
-  if (currentDist > 0 && currentDist <= effectiveRange) {
-    pushReading(currentDist, sweepAngle);
-    updateAngleHistory(sweepAngle, currentDist); }
+  if (currentDist > 0 && currentDist <= effectiveRange) { pushReading(currentDist, sweepAngle); updateAngleHistory(sweepAngle, currentDist); }
   else { buf[bIdx % BUF_SIZE] = 0.0; if (++bIdx >= BUF_SIZE) bufFull = true; }
-  if (isObstructed(sweepAngle, currentDist)) obstructionTimer = OBSTRUCTION_HOLD;
-  if (obstructionTimer > 0) { obstructionTimer--; obstructionDetected = true; }
-  else obstructionDetected = false;
+  if (isObstructed(sweepAngle, currentDist)) { obstructionTimer = OBSTRUCTION_HOLD; if (obstructedAngleMin < 0 || sweepAngle < obstructedAngleMin) obstructedAngleMin = sweepAngle; if (obstructedAngleMax < 0 || sweepAngle > obstructedAngleMax) obstructedAngleMax = sweepAngle; }
+  if (obstructionTimer > 0) { obstructionTimer--; obstructionDetected = true; } else { obstructionDetected = false; obstructedAngleMin = -1; obstructedAngleMax = -1; }
   if (++wlCounter >= 10) { wlCounter = 0; float rawDepth = readWaterLevel(); if (rawDepth >= 0.0) waterDepth = WL_EMA_ALPHA * rawDepth + (1.0 - WL_EMA_ALPHA) * waterDepth; }
   float  variance  = calcVariance();
   float  meanDelta = calcMeanDelta();
   Status raw       = classify(waterDepth, variance, meanDelta, obstructionDetected);
   updateDebounce(raw);
   static int liveDataCounter = 0;
-  if (++liveDataCounter >= 4) { liveDataCounter = 0; pushLiveData(); }
+  if (++liveDataCounter >= 2) { liveDataCounter = 0; pushLiveData(); }
   Serial.printf("A:%d D:%.1f Dp:%.1f V:%.2f M:%.2f O:%d C:%d S:%s\n", sweepAngle, currentDist, waterDepth, variance, meanDelta, obstructionDetected, isClogged, statusLabel(confirmedStatus));}
