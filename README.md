@@ -52,7 +52,7 @@ Key pin assignments at a glance:
 | HC-SR04 Echo | D12 / GPIO 12 |
 | HW-038 Water Level (Power) | D33 / GPIO 33 |
 | HW-038 Water Level (Signal) | D34 / GPIO 34 |
-| Passive Buzzer | D32 / GPIO 32 |
+| Active Buzzer | D32 / GPIO 32 |
 | Green LED | D25 / GPIO 25 |
 | Yellow LED | D26 / GPIO 26 |
 | Red LED | D27 / GPIO 27 |
