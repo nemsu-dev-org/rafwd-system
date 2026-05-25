@@ -33,7 +33,3 @@ The firmware operates a WebSocket server, captive portal, and an HTML5 canvas ra
 - `SENSOR_HEIGHT_CM = 9.0`: The baseline distance to the floor at 90° (center).
 - `CONTAINER_HALF_WIDTH = 8.5`: Used to compute the maximum valid beam distance at steep angles (`calcAngleRange`).
 - `SWEEP_MIN = 47` / `SWEEP_MAX = 133`: The precise angle limits where the ultrasonic beam strikes the container's physical edges.
-- `WATER_SAFETY_MARGIN = 0.5`: Additional padding added to the water depth to compensate for the HW-038's tendency to under-report water levels.
-- `MIN_EFFECTIVE_RANGE = 2.5`: Minimum allowed range ceiling to ensure proximity scanning remains active.
-- `OBSTRUCT_THRESH = 1.2`: A delta of 1.2 cm or greater from the baseline is required to flag an obstruction.
-- `VARIANCE_THRESH = 2.5` / `MEAN_DELTA_THRESH = 1.5`: The variance buffer thresholds to trigger a `WASTE` state.
